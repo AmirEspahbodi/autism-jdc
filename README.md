@@ -1,93 +1,339 @@
-# Justification-Driven Classification (JDC) Framework
+# Neuro-Symbolic Justification-Driven Classification (JDC) System
 
-A Neuro-Symbolic framework for detecting ableism in text using fine-tuned LLMs with structured reasoning.
+A production-grade Python implementation of a neuro-symbolic AI system that fine-tunes Large Language Models (LLMs) using LoRA to perform justification-driven classification of ableist language.
 
-## Overview
+## 🎯 Core Concept
 
-This project implements Steps 3 (Fine-Tuning) and 4 (Evaluation) of the JDC framework:
-- **Step 3**: Fine-tune Llama 3 8B or Mistral 7B using QLoRA (4-bit quantization)
-- **Step 4**: Evaluate the model with resilient JSON parsing and comprehensive metrics
+Unlike traditional classification systems that directly output labels, this system:
 
-## Project Structure
+1. **Generates Justifications**: Fine-tunes an LLM to produce structured JSON reasoning based on a symbolic Knowledge Base
+2. **Derives Labels**: Maps the generated justification to binary labels through deterministic rules
+3. **Ensures Interpretability**: Every classification decision is backed by explicit reasoning
+
+## 🏗️ Architecture
+
+Built following **Clean Architecture** (Onion/Hexagonal) principles:
 
 ```
-jdc_framework/
-├── configs/
-│   ├── train_config.yaml      # Training hyperparameters
-│   └── eval_config.yaml       # Evaluation settings
-├── src/
-│   ├── data/
-│   │   ├── __init__.py
-│   │   └── dataset.py         # Data loading and formatting
-│   ├── modeling/
-│   │   ├── __init__.py
-│   │   └── model_loader.py    # Model/tokenizer setup with QLoRA
-│   ├── training/
-│   │   ├── __init__.py
-│   │   └── trainer.py         # Custom training logic
-│   ├── inference/
-│   │   ├── __init__.py
-│   │   ├── generator.py       # Inference engine
-│   │   └── parser.py          # Resilient JSON parser
-│   └── utils/
-│       ├── __init__.py
-│       ├── config.py          # Configuration schemas
-│       └── metrics.py         # Evaluation metrics
-├── scripts/
-│   ├── train.py               # Training entry point
-│   └── evaluate.py            # Evaluation entry point
-├── requirements.txt
-└── README.md
+┌─────────────────────────────────────────┐
+│         Domain Layer (Pure)             │
+│  - Entities (Principle, Justification)  │
+│  - Interfaces (Ports)                   │
+│  - No external dependencies             │
+└──────────────┬──────────────────────────┘
+               │
+┌──────────────▼──────────────────────────┐
+│       Application Layer                 │
+│  - FineTuneModelUseCase                 │
+│  - EvaluateModelUseCase                 │
+│  - Orchestration logic                  │
+└──────────────┬──────────────────────────┘
+               │
+┌──────────────▼──────────────────────────┐
+│      Infrastructure Layer               │
+│  - LoRAAdapter (PEFT, transformers)     │
+│  - HuggingFaceInferenceAdapter          │
+│  - RobustJSONParser                     │
+│  - StandardMetricsRepository            │
+└─────────────────────────────────────────┘
 ```
 
-## Installation
+### Layer Responsibilities
+
+- **Domain**: Pure business logic, no framework dependencies
+- **Application**: Use cases that orchestrate domain entities
+- **Infrastructure**: Concrete implementations using external libraries
+
+## 🚀 Features
+
+- ✅ **LoRA Fine-Tuning**: Efficient parameter-efficient fine-tuning for consumer GPUs
+- ✅ **4-bit/8-bit Quantization**: Train on RTX 4090 or similar
+- ✅ **Multi-Model Support**: Llama 3 8B, Mistral 7B
+- ✅ **Robust Parsing**: Handles malformed JSON from LLM outputs
+- ✅ **Comprehensive Metrics**: F1, Precision, Recall, Accuracy
+- ✅ **Detailed Reporting**: Qualitative evaluation with error analysis
+- ✅ **Type-Safe**: Full mypy type hints
+- ✅ **Configuration Management**: Pydantic-based configs
+
+## 📋 Requirements
+
+### Hardware
+- **Recommended**: GPU with 16GB+ VRAM (RTX 4090, A100, etc.)
+- **Minimum**: 8GB VRAM with 4-bit quantization
+- **CPU**: Will work but very slow
+
+### Software
+- Python 3.10+
+- CUDA 11.8+ (for GPU acceleration)
+- 20GB+ disk space (for model caching)
+
+## 🛠️ Installation
+
+### 1. Clone the Repository
 
 ```bash
-# Create virtual environment
+git clone <repository-url>
+cd jdc_system
+```
+
+### 2. Create Virtual Environment
+
+```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
 
-# Install dependencies
+### 3. Install Dependencies
+
+```bash
 pip install -r requirements.txt
 ```
 
-## Usage
-
-### Training (Step 3)
+### 4. Verify Installation
 
 ```bash
-python scripts/train.py --config configs/train_config.yaml
+python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
 ```
 
-### Evaluation (Step 4)
+## 📖 Usage
+
+### Quick Start: Full Pipeline
+
+Run both training and evaluation:
 
 ```bash
-python scripts/evaluate.py --config configs/eval_config.yaml
+python main.py --mode full
 ```
 
-## Key Features
+### Training Only
 
-- **QLoRA Fine-Tuning**: 4-bit quantization for efficient training on consumer GPUs
-- **Resilient JSON Parsing**: Handles malformed model outputs gracefully
-- **Comprehensive Metrics**: Accuracy, Precision, Recall, F1-Score
-- **Qualitative Analysis**: Disagreement logging for error analysis
-- **Modular Architecture**: Clean separation of concerns for maintainability
+Fine-tune the model on generated examples:
 
-## Configuration
+```bash
+python main.py --mode train --epochs 5 --batch-size 4
+```
 
-Edit YAML files in `configs/` to adjust:
-- Model selection (Llama 3 8B / Mistral 7B)
-- LoRA hyperparameters (rank, alpha, dropout)
-- Training settings (learning rate, batch size, epochs)
-- Quantization settings (4-bit, 8-bit)
+### Evaluation Only
 
-## Output
+Evaluate an already fine-tuned model:
 
-Training produces:
-- `checkpoints/`: Model adapter weights
-- `logs/`: Training logs
+```bash
+python main.py --mode eval
+```
 
-Evaluation produces:
-- `results.json`: Aggregate metrics
-- `disagreements.csv`: Cases where model disagrees with ground truth
-- `predictions.json`: Full predictions with justifications
+### Advanced Options
+
+```bash
+# Use Mistral instead of Llama 3
+python main.py --model mistral
+
+# Custom output directory
+python main.py --output-dir ./my_results
+
+# Adjust hyperparameters
+python main.py --epochs 10 --batch-size 8 --learning-rate 1e-4
+```
+
+## 🎓 Knowledge Base
+
+The system uses 5 principles for neurodiversity-aware classification:
+
+| ID  | Principle | Label |
+|-----|-----------|-------|
+| P0  | Neutral Language | 0 (Not Ableist) |
+| P1  | Pathologizing Language | 1 (Ableist) |
+| P2  | Dehumanizing Metaphors | 1 (Ableist) |
+| P3  | Stereotyping | 1 (Ableist) |
+| P4  | Exclusionary Language | 1 (Ableist) |
+
+### Mapping Logic
+
+```python
+# Deterministic mapping in domain/types.py
+def is_ableist(self) -> bool:
+    return self.principle_id in {"P1", "P2", "P3", "P4"}
+```
+
+## 📊 Output Structure
+
+After running the pipeline, you'll find:
+
+```
+outputs/
+├── checkpoints/           # Training checkpoints
+├── fine_tuned_model/      # Final LoRA adapter
+│   ├── adapter_config.json
+│   ├── adapter_model.bin
+│   └── training_config.json
+├── evaluation_metrics.json # Quantitative metrics
+└── evaluation_report.json  # Detailed qualitative report
+```
+
+### Metrics JSON Example
+
+```json
+{
+  "precision": 0.8750,
+  "recall": 0.9333,
+  "f1_score": 0.9032,
+  "accuracy": 0.9000,
+  "true_positives": 14,
+  "false_positives": 2,
+  "true_negatives": 4,
+  "false_negatives": 1,
+  "total_examples": 20,
+  "parsing_failures": 0
+}
+```
+
+## 🧪 Testing with Real Data
+
+To use your own AUTALIC dataset:
+
+1. Prepare data in JSON format:
+
+```json
+[
+  {
+    "sentence": "Your target sentence here",
+    "context_before": "Optional context",
+    "context_after": "Optional context",
+    "justification": {
+      "principle_id": "P1",
+      "justification_text": "Explanation...",
+      "evidence_quote": "Relevant quote"
+    },
+    "label": 1
+  }
+]
+```
+
+2. Replace `MockDataLoader` with `FileBasedDataLoader` in `main.py`:
+
+```python
+from infrastructure import FileBasedDataLoader
+
+data_loader = FileBasedDataLoader(data_dir=Path("./data"))
+```
+
+## 🔧 Customization
+
+### Change Base Model
+
+Edit `config.py`:
+
+```python
+from config import ModelType
+
+config = SystemConfig(
+    model_type=ModelType.MISTRAL_7B  # or ModelType.LLAMA3_8B
+)
+```
+
+### Adjust LoRA Rank
+
+Higher rank = more parameters = better fit but slower:
+
+```python
+config.lora_config.r = 32  # Default: 16
+```
+
+### Modify Quantization
+
+```python
+from config import QuantizationType
+
+config.quantization_config.quantization_type = QuantizationType.BIT_8
+```
+
+## 🧰 Project Structure
+
+```
+jdc_system/
+├── domain/                 # Pure domain logic
+│   ├── types.py           # Entities (Principle, Justification, etc.)
+│   └── interfaces.py      # Ports (LLMTrainer, InferenceEngine, etc.)
+├── application/           # Use cases
+│   └── services.py        # FineTuneModelUseCase, EvaluateModelUseCase
+├── infrastructure/        # Adapters
+│   ├── llm.py            # LoRAAdapter, HuggingFaceInferenceAdapter
+│   ├── parsing.py        # RobustJSONParser
+│   ├── metrics.py        # StandardMetricsRepository
+│   └── data_loader.py    # MockDataLoader, FileBasedDataLoader
+├── config.py             # Pydantic configuration models
+├── main.py               # Entry point with dependency injection
+└── requirements.txt      # Python dependencies
+```
+
+## 📝 Design Decisions
+
+### Why Clean Architecture?
+
+- **Testability**: Each layer can be tested independently
+- **Flexibility**: Easy to swap implementations (e.g., switch from HuggingFace to JAX)
+- **Maintainability**: Clear separation of concerns
+- **Domain-Driven**: Business logic is protected from framework changes
+
+### Why LoRA?
+
+- **Efficiency**: Only trains ~0.1% of parameters
+- **Memory**: Fits in consumer GPUs
+- **Speed**: Faster training than full fine-tuning
+- **Preservation**: Doesn't corrupt base model knowledge
+
+### Why Deterministic Mapping?
+
+- **Consistency**: Same justification always produces same label
+- **Interpretability**: Clear rule-based logic
+- **Debuggability**: Easy to trace classification decisions
+
+## 🐛 Troubleshooting
+
+### CUDA Out of Memory
+
+```bash
+# Reduce batch size
+python main.py --batch-size 2
+
+# Use 4-bit quantization (default)
+# Or reduce LoRA rank in config.py
+config.lora_config.r = 8
+```
+
+### Model Download Fails
+
+```bash
+# Set HuggingFace cache directory
+export HF_HOME=/path/to/large/disk
+```
+
+### Parsing Errors
+
+The system uses `LenientJSONParser` by default which attempts recovery.
+For strict validation:
+
+```python
+from infrastructure import StrictJSONParser
+
+parser = StrictJSONParser()
+```
+
+## 📚 References
+
+- [LoRA Paper](https://arxiv.org/abs/2106.09685)
+- [Clean Architecture Book](https://www.amazon.com/Clean-Architecture-Craftsmans-Software-Structure/dp/0134494164)
+- [PEFT Documentation](https://huggingface.co/docs/peft)
+
+## 📄 License
+
+MIT License - See LICENSE file for details
+
+## 🙏 Acknowledgments
+
+- Built for neurodiversity-aware NLP research
+- Inspired by the AUTALIC dataset and neuro-symbolic AI principles
+- Uses HuggingFace transformers, PEFT, and bitsandbytes
+
+---
+
+**Note**: This is a demonstration system using synthetic data. For production use with real AUTALIC data, replace `MockDataLoader` with actual dataset loading logic.
