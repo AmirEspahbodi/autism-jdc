@@ -1,0 +1,41 @@
+# Evaluation Configuration for JDC Framework
+
+# Model Configuration
+model_name: "meta-llama/Meta-Llama-3-8B-Instruct"
+adapter_path: "./checkpoints/jdc_llama3_8b"  # Path to fine-tuned LoRA adapters
+
+# Data Configuration
+test_data_path: "data/test.jsonl"
+max_seq_length: 2048
+
+# Generation Parameters
+batch_size: 8
+max_new_tokens: 256
+temperature: 0.1        # Low temperature for deterministic outputs
+top_p: 0.9
+do_sample: true
+
+# Parsing Configuration
+max_parse_retries: 3
+fallback_principle: "P_ERR"  # Principle ID for parsing errors
+
+# Output Configuration
+output_dir: "./evaluation_results"
+save_predictions: true
+save_disagreements: true
+
+# Device Configuration
+load_in_4bit: true
+device_map: "auto"
+
+# Principle Mapping
+# Map these principles to "Ableist" (label = 1)
+ableist_principles:
+  - "P1"
+  - "P2"
+  - "P3"
+  - "P4"
+
+# Map these principles to "Non-Ableist" (label = 0)
+non_ableist_principles:
+  - "P0"
