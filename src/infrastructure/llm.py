@@ -17,7 +17,7 @@ from transformers import (
     Trainer,
     TrainingArguments,
 )
-from trl import DataCollatorForCompletionOnlyLM, SFTTrainer
+from trl import, SFTTrainer
 
 from src.config import ModelType, SystemConfig
 from src.domain import (
@@ -205,7 +205,6 @@ class LoRAAdapter(LLMTrainer):
             response_template = self._derive_response_template()
 
             # Use SFTConfig instead of TrainingArguments
-            # completion_only_loss=True enables the internal DataCollatorForCompletionOnlyLM
             training_args = SFTConfig(
                 output_dir=str(self.config.output_dir / "checkpoints"),
                 num_train_epochs=self.config.training_hyperparameters.num_epochs,
