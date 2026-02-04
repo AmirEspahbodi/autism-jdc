@@ -11,6 +11,7 @@ from src.infrastructure.data_loader import (
     PreformattedDataLoader,
 )
 from src.infrastructure.llm import (
+    HuggingFaceInferenceAdapter,
     LoRAAdapter,
     PromptTemplate,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "MockDataLoader",
     # LLM Adapters
     "LoRAAdapter",
+    "HuggingFaceInferenceAdapter",
     "PromptTemplate",
     # Metrics and Reporting
     "ConsoleReportGenerator",

@@ -58,7 +58,6 @@ class PromptTemplate:
             return {"input": example.input_prompt, "output": example.model_output}
 
         # Case 2: Legacy Structured Data (Fallback)
-        # ... (Previous implementation for backward compatibility if needed) ...
         # Simplified for this refactor to focus on the request:
         raise NotImplementedError(
             "Legacy prompt construction is deprecated in this refactor."
@@ -73,26 +72,9 @@ class PromptTemplate:
     ) -> list[dict[str, str]]:
         """
         Build an inference prompt (input only).
-        Maintained for Evaluation Use Case which might still use dynamic construction.
+        Maintained for backwards compatibility if needed.
         """
-        SYSTEM_INSTRUCTION = (
-            """You are an expert in neurodiversity-aware language analysis..."""
-        )
-
-        context_parts = []
-        if context_before:
-            context_parts.append(f"Previous context: {context_before}")
-        context_parts.append(f"Target sentence: {sentence}")
-        if context_after:
-            context_parts.append(f"Following context: {context_after}")
-
-        context_text = "\n".join(context_parts)
-        user_message = f"{kb_text}\n\n{context_text}\n\nAnalyze the target sentence..."
-
-        return [
-            {"role": "system", "content": SYSTEM_INSTRUCTION},
-            {"role": "user", "content": user_message},
-        ]
+        return [{"role": "user", "content": f"{kb_text}\n{sentence}"}]
 
 
 class LoRAAdapter(LLMTrainer):
@@ -108,7 +90,6 @@ class LoRAAdapter(LLMTrainer):
     def _initialize_model(self) -> None:
         print(f"Loading base model: {self.config.model_type.value}")
 
-        # (Quantization logic remains unchanged)
         if self.config.quantization_config.quantization_type.value != "none":
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=(
@@ -144,12 +125,10 @@ class LoRAAdapter(LLMTrainer):
 
         self.tokenizer.padding_side = "right"
 
-        # IMPORTANT: For pre-formatted data, we want full control over tokens
         if hasattr(self.tokenizer, "add_bos_token"):
             self.tokenizer.add_bos_token = False
 
     def _prepare_peft_model(self) -> None:
-        # (PEFT logic remains unchanged)
         self.model = prepare_model_for_kbit_training(self.model)
         self.model.gradient_checkpointing_enable()
 
@@ -170,23 +149,13 @@ class LoRAAdapter(LLMTrainer):
         examples: list[LabeledExample],
         kb_text: str,  # Ignored for pre-formatted
     ) -> list[dict[str, Any]]:
-        """
-        Format examples into tokenized training data.
-        Refactored: Concatenates input+output and tokenizes directly.
-        """
         formatted = []
 
         for example in examples:
             prompt_data = PromptTemplate.build_training_prompt(example)
-
-            # SFT Logic: Concatenate Input + Output + EOS
-            # We assume input_prompt already contains necessary system/role headers
             text = (
                 prompt_data["input"] + prompt_data["output"] + self.tokenizer.eos_token
             )
-
-            # Direct tokenization of the raw string
-            # We do NOT use apply_chat_template here to avoid double-wrapping
             encoded = self.tokenizer(
                 text,
                 truncation=True,
@@ -194,7 +163,6 @@ class LoRAAdapter(LLMTrainer):
                 padding="max_length",
                 return_tensors="pt",
             )
-
             formatted.append(
                 {
                     "input_ids": encoded["input_ids"][0].tolist(),
@@ -205,32 +173,22 @@ class LoRAAdapter(LLMTrainer):
         return formatted
 
     def _prepare_data_collator(self):
-        """
-        Create data collator.
-        Note: Depends on finding the separator to mask the input.
-        """
         from src.config import ModelType
 
         response_template_ids = None
 
-        # We assume the pre-formatted data uses standard templates corresponding
-        # to the model type selected in config.
         if self.config.model_type == ModelType.LLAMA3_8B:
-            # Llama 3: <|start_header_id|>assistant<|end_header_id|>\n\n
             template_str = "<|start_header_id|>assistant<|end_header_id|>\n\n"
             response_template_ids = self.tokenizer.encode(
                 template_str, add_special_tokens=False
             )
-
         elif self.config.model_type == ModelType.MISTRAL_7B:
-            # Mistral: [/INST]
             template_str = "[/INST]"
             response_template_ids = self.tokenizer.encode(
                 template_str, add_special_tokens=False
             )
 
         if not response_template_ids:
-            # Fallback
             template_str = "assistant"
             response_template_ids = self.tokenizer.encode(
                 template_str, add_special_tokens=False
@@ -253,20 +211,15 @@ class LoRAAdapter(LLMTrainer):
     ) -> None:
         try:
             self._prepare_peft_model()
-
-            # KB Text is technically not used by formatting anymore, but kept for signature compatibility
             kb_text = ""
-
             train_dataset = self._format_examples_for_training(
                 training_examples, kb_text
             )
-
             eval_dataset = None
             if validation_examples:
                 eval_dataset = self._format_examples_for_training(
                     validation_examples, kb_text
                 )
-
             data_collator = self._prepare_data_collator()
 
             training_args = TrainingArguments(
@@ -311,4 +264,168 @@ class LoRAAdapter(LLMTrainer):
         self.tokenizer.save_pretrained(str(output_dir))
 
     def load_model(self, model_path: str) -> None:
-        pass  # Implementation omitted for brevity
+        pass
+
+
+class HuggingFaceInferenceAdapter(InferenceEngine):
+    """Concrete implementation of InferenceEngine using Hugging Face transformers.
+    Supports loading fine-tuned LoRA models and batch generation.
+    """
+
+    def __init__(self, config: SystemConfig, model_path: str) -> None:
+        """
+        Args:
+            config: System configuration.
+            model_path: Path to the fine-tuned LoRA adapter.
+        """
+        self.config = config
+        self.model_path = model_path
+        self.model: Optional[AutoModelForCausalLM] = None
+        self.tokenizer: Optional[AutoTokenizer] = None
+        self._load_model()
+
+    def _load_model(self) -> None:
+        print(f"Loading base model for inference: {self.config.model_type.value}")
+
+        # Load Base Model
+        # Note: We usually use 4-bit/8-bit for inference if configured, similar to training
+        if self.config.quantization_config.quantization_type.value != "none":
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=(
+                    self.config.quantization_config.quantization_type.value == "4bit"
+                ),
+                load_in_8bit=(
+                    self.config.quantization_config.quantization_type.value == "8bit"
+                ),
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_quant_type=self.config.quantization_config.bnb_4bit_quant_type,
+                bnb_4bit_use_double_quant=self.config.quantization_config.bnb_4bit_use_double_quant,
+            )
+        else:
+            bnb_config = None
+
+        try:
+            base_model = AutoModelForCausalLM.from_pretrained(
+                self.config.model_type.value,
+                quantization_config=bnb_config,
+                device_map="auto",
+                trust_remote_code=True,
+                cache_dir=str(self.config.cache_dir),
+            )
+
+            # Load LoRA Adapter
+            print(f"Loading LoRA adapter from: {self.model_path}")
+            self.model = PeftModel.from_pretrained(base_model, self.model_path)
+
+            # Load Tokenizer
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.config.model_type.value,
+                trust_remote_code=True,
+                cache_dir=str(self.config.cache_dir),
+            )
+
+            # Configure tokenizer for generation (left padding is crucial for batch generation)
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+                self.model.config.pad_token_id = self.tokenizer.eos_token_id
+
+            self.tokenizer.padding_side = "left"
+
+        except Exception as e:
+            raise InferenceError(f"Failed to load model: {str(e)}") from e
+
+    def generate_justification(
+        self,
+        sentence: str,
+        context_before: str | None = None,
+        context_after: str | None = None,
+        kb_text: str | None = None,
+    ) -> str:
+        """Single generation (Legacy/Wrapper)."""
+        # Create a temporary example to leverage common logic if needed,
+        # but for SFT we normally prefer batch_generate with full prompts.
+        # This is a fallback implementation.
+        prompt = f"{kb_text or ''}\n{context_before or ''}\n{sentence}\n{context_after or ''}"
+
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=self.config.inference_config.max_new_tokens,
+                temperature=self.config.inference_config.temperature,
+                do_sample=self.config.inference_config.do_sample,
+            )
+
+        return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    def batch_generate(
+        self,
+        examples: list[LabeledExample],
+        kb_text: str,  # Kept for interface consistency, might be unused in SFT
+    ) -> list[str]:
+        """
+        Generate completions for a batch of examples.
+        Uses 'input_prompt' from the examples.
+        """
+        if not examples:
+            return []
+
+        # Extract prompts. Ensure we rely on the pre-formatted input_prompt
+        prompts = [ex.input_prompt for ex in examples if ex.input_prompt]
+
+        if not prompts:
+            raise InferenceError("No valid input_prompts found in examples.")
+
+        results = []
+        batch_size = (
+            self.config.training_hyperparameters.batch_size
+        )  # Reuse batch size or define new
+
+        print(f"Starting inference on {len(prompts)} examples...")
+
+        for i in range(0, len(prompts), batch_size):
+            batch_prompts = prompts[i : i + batch_size]
+
+            # Tokenize
+            inputs = self.tokenizer(
+                batch_prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=self.config.training_hyperparameters.max_seq_length,
+            ).to(self.model.device)
+
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    input_ids=inputs.input_ids,
+                    attention_mask=inputs.attention_mask,
+                    max_new_tokens=self.config.inference_config.max_new_tokens,
+                    temperature=self.config.inference_config.temperature,
+                    top_p=self.config.inference_config.top_p,
+                    top_k=self.config.inference_config.top_k,
+                    do_sample=self.config.inference_config.do_sample,
+                    repetition_penalty=self.config.inference_config.repetition_penalty,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
+
+            # Decode
+            # We only want the *new* tokens, not the input prompt
+            decoded_batch = []
+            for j, output in enumerate(outputs):
+                input_len = inputs.input_ids[j].shape[0]
+                # In some cases generate returns input + output.
+                # We slice off the input length if it matches.
+                # However, with padding, calculating exact input length per row is tricky
+                # if not careful.
+                # Safer approach: decode full and strip prompt, or slice strictly by generated tokens.
+
+                # Standard approach for causal LM generation in HF often returns full sequence.
+                # Let's decode only the new tokens.
+                generated_tokens = output[inputs.input_ids.shape[1] :]
+                text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+                decoded_batch.append(text)
+
+            results.extend(decoded_batch)
+
+        return results
