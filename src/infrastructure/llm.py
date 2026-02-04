@@ -1,6 +1,6 @@
 """
 Infrastructure LLM module - Concrete implementations for LLM training and inference.
-Refactored to fix SFT masking alignment and EOS/BOS token handling.
+Refactored to fix SFT masking alignment, Llama 3 templating, and quantization safety.
 """
 
 import json
@@ -24,7 +24,7 @@ from transformers import (
 )
 from trl import DataCollatorForCompletionOnlyLM, SFTTrainer
 
-from src.config import SystemConfig
+from src.config import ModelType, SystemConfig
 from src.domain import (
     InferenceEngine,
     InferenceError,
@@ -36,53 +36,51 @@ from src.domain import (
 
 class PromptTemplate:
     """Handles prompt formatting.
-    Refactored: Now acts as a pass-through for preformatted data.
+    Refactored: Now acts as a pass-through for preformatted data, relying on
+    tokenizer.apply_chat_template for structure.
     """
 
     @staticmethod
-    def build_training_prompt(
-        example: LabeledExample, kb_text: str = ""
-    ) -> dict[str, str]:
+    def build_training_messages(
+        example: LabeledExample,
+    ) -> list[dict[str, str]]:
         """
-        Build a training prompt.
-
-        Args:
-            example: Labeled training example.
-            kb_text: Knowledge base text (IGNORED for preformatted data).
-
-        Returns:
-            Dictionary with 'input' and 'output'.
+        Build a list of messages for chat templating.
         """
-        # Case 1: Pre-formatted SFT Data
         if example.input_prompt is not None and example.model_output is not None:
-            # Return raw strings. No modification, no system prompt injection.
-            return {"input": example.input_prompt, "output": example.model_output}
+            return [
+                {"role": "user", "content": example.input_prompt},
+                {"role": "assistant", "content": example.model_output},
+            ]
 
-        # Case 2: Legacy Structured Data (Fallback)
-        raise NotImplementedError(
-            "Legacy prompt construction is deprecated in this refactor."
-        )
+        raise NotImplementedError("Legacy prompt construction is deprecated.")
 
     @staticmethod
-    def build_inference_prompt(
+    def build_inference_messages(
         sentence: str,
-        kb_text: str,
+        kb_text: str = "",
         context_before: Optional[str] = None,
         context_after: Optional[str] = None,
     ) -> list[dict[str, str]]:
         """
-        Build an inference prompt (input only).
-        Maintained for backwards compatibility if needed.
+        Build inference message list.
         """
-        return [{"role": "user", "content": f"{kb_text}\n{sentence}"}]
+        # Construct the full user content
+        parts = []
+        if kb_text:
+            parts.append(kb_text)
+        if context_before:
+            parts.append(context_before)
+        parts.append(sentence)
+        if context_after:
+            parts.append(context_after)
+
+        full_content = "\n\n".join(parts)
+        return [{"role": "user", "content": full_content}]
 
 
 class LoRAAdapter(LLMTrainer):
     """Adapter for fine-tuning LLMs using LoRA."""
-
-    # CONSTANT SEPARATOR for Robust Masking
-    # This ensures the DataCollator always finds the split point, regardless of model type.
-    RESPONSE_SEPARATOR = "\n### Response:\n"
 
     def __init__(self, config: SystemConfig) -> None:
         self.config = config
@@ -124,20 +122,18 @@ class LoRAAdapter(LLMTrainer):
         )
 
         # ---------------------------------------------------------------------
-        # FIX 1: EOS Token Blindness & BOS Duplication
+        # FIX 1 & 2: Quantization Safety & Tokenizer Setup
         # ---------------------------------------------------------------------
-        # 1. Disable automatic BOS adding. We want control or to rely on the prompt text.
-        #    Llama 3 often adds BOS automatically, leading to double BOS if not handled.
-        self.tokenizer.add_bos_token = False
+        # 1. We DO NOT resize embeddings on quantized models. It corrupts weights.
+        # 2. We reuse the EOS token as PAD. This is standard for Llama/Mistral.
+        self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # 2. Add PAD token if missing (Essential for SFTTrainer/Collator)
-        if self.tokenizer.pad_token is None:
-            print("Adding distinct [PAD] token to tokenizer...")
-            self.tokenizer.add_special_tokens({"pad_token": "[PAD]"})
-            self.model.resize_token_embeddings(len(self.tokenizer))
-
-        # 3. Set padding side to right for SFTTrainer compatibility
+        # 3. Set padding side to right for SFTTrainer
         self.tokenizer.padding_side = "right"
+
+        # 4. Disable manual BOS addition; let apply_chat_template handle it
+        if hasattr(self.tokenizer, "add_bos_token"):
+            self.tokenizer.add_bos_token = False
 
     def _prepare_peft_model(self) -> None:
         self.model = prepare_model_for_kbit_training(self.model)
@@ -159,27 +155,20 @@ class LoRAAdapter(LLMTrainer):
     def _format_examples_for_training(
         self,
         examples: list[LabeledExample],
-        kb_text: str,
     ) -> Dataset:
         """
-        Refactored to inject the robust separator explicitly.
-        Structure: [Input] + [Separator] + [Output] + [EOS]
+        Refactored to use tokenizer.apply_chat_template.
+        This handles Llama 3 header IDs (<|start_header_id|>) and EOS/BOS automatically.
         """
         data_list = []
 
         for example in examples:
-            prompt_data = PromptTemplate.build_training_prompt(example)
+            # Create list of messages [{"role": "user", ...}, {"role": "assistant", ...}]
+            messages = PromptTemplate.build_training_messages(example)
 
-            # -----------------------------------------------------------------
-            # FIX 2: Explicit Template Injection
-            # -----------------------------------------------------------------
-            # We explicitly inject the separator so the Collator can find it.
-            # We also append the EOS token string to ensure the model learns to stop.
-            full_text = (
-                f"{prompt_data['input']}"
-                f"{self.RESPONSE_SEPARATOR}"
-                f"{prompt_data['output']}"
-                f"{self.tokenizer.eos_token}"
+            # Apply template to generate full training string
+            full_text = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=False
             )
 
             data_list.append({"text": full_text})
@@ -188,26 +177,28 @@ class LoRAAdapter(LLMTrainer):
 
     def _prepare_data_collator(self):
         """
-        Refactored to use the explicit separator for masking.
-        Do NOT guess the template based on ModelType.
+        Configure the data collator with the correct response separator
+        based on the ModelType.
         """
+        # Determine the response template string that the Collator needs to find
+        # to start calculating loss (masking the instruction).
 
-        # -----------------------------------------------------------------
-        # FIX 3: Robust Masking Configuration
-        # -----------------------------------------------------------------
-        # Use the exact same string we injected in `_format_examples_for_training`.
-        response_template_str = self.RESPONSE_SEPARATOR
-
-        # We generally do not need to encode it manually; the Collator accepts the string.
-        # However, to be safe against tokenizer edge cases (like whitespace stripping),
-        # passing the string is usually preferred for `response_template`.
+        if "llama-3" in self.config.model_type.value.lower():
+            # Llama 3 specific header for assistant turn
+            response_template = "<|start_header_id|>assistant<|end_header_id|>\n\n"
+        elif "mistral" in self.config.model_type.value.lower():
+            # Standard Mistral instruction end
+            response_template = "[/INST]"
+        else:
+            # Fallback for generic models, though specific template is preferred
+            response_template = "### Response:\n"
 
         print(
-            f"✓ Data collator configured. Masking inputs before: {repr(response_template_str)}"
+            f"✓ Data collator configured using response template: {repr(response_template)}"
         )
 
         data_collator = DataCollatorForCompletionOnlyLM(
-            response_template=response_template_str,
+            response_template=response_template,
             tokenizer=self.tokenizer,
             mlm=False,
         )
@@ -221,17 +212,12 @@ class LoRAAdapter(LLMTrainer):
     ) -> None:
         try:
             self._prepare_peft_model()
-            kb_text = ""
 
-            train_dataset = self._format_examples_for_training(
-                training_examples, kb_text
-            )
+            train_dataset = self._format_examples_for_training(training_examples)
 
             eval_dataset = None
             if validation_examples:
-                eval_dataset = self._format_examples_for_training(
-                    validation_examples, kb_text
-                )
+                eval_dataset = self._format_examples_for_training(validation_examples)
 
             data_collator = self._prepare_data_collator()
 
@@ -324,16 +310,15 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                 cache_dir=str(self.config.cache_dir),
             )
 
-            # 2. Replicate Tokenizer Modifications from LoRAAdapter
-            if self.tokenizer.pad_token is None:
-                print("Adding distinct [PAD] token to tokenizer (matching training)...")
-                self.tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+            # 2. Tokenizer Hygiene (Matching Training)
+            # Use EOS as PAD. Do NOT add new tokens or resize embeddings.
+            self.tokenizer.pad_token = self.tokenizer.eos_token
 
-            # Ensure BOS settings match training
+            # Disable auto BOS (we rely on chat template)
             if hasattr(self.tokenizer, "add_bos_token"):
                 self.tokenizer.add_bos_token = False
 
-            # Configure for inference
+            # Configure for inference (left padding is crucial for generation)
             self.tokenizer.padding_side = "left"
 
             # 3. Load Base Model
@@ -345,15 +330,12 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                 cache_dir=str(self.config.cache_dir),
             )
 
-            print(f"Resizing model embeddings to {len(self.tokenizer)}...")
-            base_model.resize_token_embeddings(len(self.tokenizer))
-
-            # 5. Load LoRA Adapter
+            # 4. Load LoRA Adapter
             print(f"Loading LoRA adapter from: {self.model_path}")
             self.model = PeftModel.from_pretrained(base_model, self.model_path)
 
-            if self.tokenizer.pad_token_id is not None:
-                self.model.config.pad_token_id = self.tokenizer.pad_token_id
+            # Ensure pad_token_id is synced
+            self.model.config.pad_token_id = self.tokenizer.pad_token_id
 
         except Exception as e:
             raise InferenceError(f"Failed to load model: {str(e)}") from e
@@ -365,10 +347,21 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
         context_after: str | None = None,
         kb_text: str | None = None,
     ) -> str:
-        """Single generation (Legacy/Wrapper)."""
-        prompt = f"{kb_text or ''}\n{context_before or ''}\n{sentence}\n{context_after or ''}{LoRAAdapter.RESPONSE_SEPARATOR}"
+        """
+        Single generation with strict slicing to return ONLY new tokens.
+        """
+        # Build messages and apply template
+        messages = PromptTemplate.build_inference_messages(
+            sentence, kb_text, context_before, context_after
+        )
+        prompt = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
 
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+
+        # Calculate input length for slicing later
+        input_len = inputs.input_ids.shape[1]
 
         with torch.no_grad():
             outputs = self.model.generate(
@@ -376,9 +369,14 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                 max_new_tokens=self.config.inference_config.max_new_tokens,
                 temperature=self.config.inference_config.temperature,
                 do_sample=self.config.inference_config.do_sample,
+                pad_token_id=self.tokenizer.pad_token_id,
             )
 
-        return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        # FIX 3: Output Slicing
+        # Slice the output to exclude the input prompt
+        generated_tokens = outputs[0][input_len:]
+
+        return self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
     def batch_generate(
         self,
@@ -387,19 +385,19 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
     ) -> list[str]:
         """
         Generate completions for a batch of examples.
-        Uses 'input_prompt' from the examples.
+        Uses apply_chat_template for consistency.
         """
         if not examples:
             return []
 
-        # Update: We should likely append the separator here too if the input_prompt
-        # doesn't contain it, but SFT input_prompts usually end where the model should start.
-        # Assuming input_prompt is the question/instruction.
         prompts = []
         for ex in examples:
             if ex.input_prompt:
-                # Append separator to prompt trigger generation
-                p = f"{ex.input_prompt}{LoRAAdapter.RESPONSE_SEPARATOR}"
+                # Wrap preformatted prompt in user message
+                messages = [{"role": "user", "content": ex.input_prompt}]
+                p = self.tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
                 prompts.append(p)
 
         if not prompts:
@@ -421,9 +419,15 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                 max_length=self.config.training_hyperparameters.max_seq_length,
             ).to(self.model.device)
 
+            input_ids = inputs.input_ids
+            # Keep track of input lengths for each item in batch
+            # (Note: due to left padding, simple slicing is harder, but since
+            # we return new tokens only, we can use the input width relative to output)
+            input_width = input_ids.shape[1]
+
             with torch.no_grad():
                 outputs = self.model.generate(
-                    input_ids=inputs.input_ids,
+                    input_ids=input_ids,
                     attention_mask=inputs.attention_mask,
                     max_new_tokens=self.config.inference_config.max_new_tokens,
                     temperature=self.config.inference_config.temperature,
@@ -435,10 +439,10 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                 )
 
             decoded_batch = []
-            for j, output in enumerate(outputs):
-                # Slice off the prompt length to return ONLY new tokens
-                input_len = inputs.input_ids[j].shape[0]
-                generated_tokens = output[input_len:]
+            for j, output_seq in enumerate(outputs):
+                # FIX 3: Batch Slicing
+                # Extract only the generated tokens
+                generated_tokens = output_seq[input_width:]
                 text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
                 decoded_batch.append(text)
 

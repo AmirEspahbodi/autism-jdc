@@ -306,11 +306,9 @@ Examples:
     if args.mode == "full":
         run_full_pipeline(config)
     elif args.mode == "train":
-        print_banner()
         check_gpu()
         run_fine_tuning(config)
     elif args.mode == "eval":
-        print_banner()
         check_gpu()
         run_evaluation(config)
     else:
