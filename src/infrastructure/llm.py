@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import torch
+from datasets import Dataset
 from peft import (
     LoraConfig,
     PeftModel,
@@ -119,10 +120,19 @@ class LoRAAdapter(LLMTrainer):
             cache_dir=str(self.config.cache_dir),
         )
 
+        # ---------------------------------------------------------------------
+        # FIX FOR BUG 1: Stop Token Blindness (EOS == PAD)
+        # ---------------------------------------------------------------------
+        # Instead of setting pad_token = eos_token (which masks EOS in loss),
+        # we ensure a distinct padding token exists.
         if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-            self.model.config.pad_token_id = self.tokenizer.eos_token_id
+            print("Adding distinct [PAD] token to tokenizer...")
+            self.tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+            # CRITICAL: Resize embeddings so the model knows about the new token
+            self.model.resize_token_embeddings(len(self.tokenizer))
 
+        # Ensure padding side is right for Training (SFTTrainer requirement usually)
+        # Note: Inference usually prefers left-padding, but SFTTrainer handles right-padding best.
         self.tokenizer.padding_side = "right"
 
         if hasattr(self.tokenizer, "add_bos_token"):
@@ -148,29 +158,26 @@ class LoRAAdapter(LLMTrainer):
         self,
         examples: list[LabeledExample],
         kb_text: str,  # Ignored for pre-formatted
-    ) -> list[dict[str, Any]]:
-        formatted = []
+    ) -> Dataset:
+        """
+        Refactored to return a HuggingFace Dataset containing raw text.
+        NO manual tokenization or padding is performed here.
+        """
+        data_list = []
 
         for example in examples:
             prompt_data = PromptTemplate.build_training_prompt(example)
-            text = (
+
+            # Construct the full text string.
+            # We explicitly append EOS to ensure the model learns to stop.
+            full_text = (
                 prompt_data["input"] + prompt_data["output"] + self.tokenizer.eos_token
             )
-            encoded = self.tokenizer(
-                text,
-                truncation=True,
-                max_length=self.config.training_hyperparameters.max_seq_length,
-                padding="max_length",
-                return_tensors="pt",
-            )
-            formatted.append(
-                {
-                    "input_ids": encoded["input_ids"][0].tolist(),
-                    "attention_mask": encoded["attention_mask"][0].tolist(),
-                }
-            )
 
-        return formatted
+            data_list.append({"text": full_text})
+
+        # Return a standard HF Dataset which SFTTrainer expects
+        return Dataset.from_list(data_list)
 
     def _prepare_data_collator(self):
         from src.config import ModelType
@@ -212,14 +219,21 @@ class LoRAAdapter(LLMTrainer):
         try:
             self._prepare_peft_model()
             kb_text = ""
+
+            # -----------------------------------------------------------------
+            # FIX FOR BUG 2: Manual Tokenization Anti-Pattern
+            # -----------------------------------------------------------------
+            # We now get datasets of raw strings, not pre-tokenized tensors.
             train_dataset = self._format_examples_for_training(
                 training_examples, kb_text
             )
+
             eval_dataset = None
             if validation_examples:
                 eval_dataset = self._format_examples_for_training(
                     validation_examples, kb_text
                 )
+
             data_collator = self._prepare_data_collator()
 
             training_args = TrainingArguments(
@@ -237,13 +251,16 @@ class LoRAAdapter(LLMTrainer):
                 optim=self.config.training_hyperparameters.optim,
                 save_total_limit=3,
                 report_to=["none"],
-                remove_unused_columns=False,
+                remove_unused_columns=False,  # Essential when using dataset_text_field
             )
 
+            # Initialize SFTTrainer with the raw text dataset.
+            # SFTTrainer will handle tokenization and packing/padding internally.
             trainer = SFTTrainer(
                 model=self.peft_model,
                 train_dataset=train_dataset,
                 eval_dataset=eval_dataset,
+                dataset_text_field="text",  # Tells SFTTrainer which column to tokenize
                 args=training_args,
                 data_collator=data_collator,
                 max_seq_length=self.config.training_hyperparameters.max_seq_length,
