@@ -16,25 +16,25 @@ Built following **Clean Architecture** (Onion/Hexagonal) principles:
 
 ```
 ┌─────────────────────────────────────────┐
-│         Domain Layer (Pure)             │
-│  - Entities (Principle, Justification)  │
-│  - Interfaces (Ports)                   │
-│  - No external dependencies             │
+│         Domain Layer (Pure)                                 │
+│  - Entities (Principle, Justification)                     │
+│  - Interfaces (Ports)                                           │
+│  - No external dependencies                            │
+└──────────────┬──────────────────────────┘
+               │
+┌──────────────▼─────────────────────────┐
+│       Application Layer                                        │
+│  - FineTuneModelUseCase                                │
+│  - EvaluateModelUseCase                                 │
+│  - Orchestration logic                                        │
 └──────────────┬──────────────────────────┘
                │
 ┌──────────────▼──────────────────────────┐
-│       Application Layer                 │
-│  - FineTuneModelUseCase                 │
-│  - EvaluateModelUseCase                 │
-│  - Orchestration logic                  │
-└──────────────┬──────────────────────────┘
-               │
-┌──────────────▼──────────────────────────┐
-│      Infrastructure Layer               │
-│  - LoRAAdapter (PEFT, transformers)     │
-│  - HuggingFaceInferenceAdapter          │
-│  - RobustJSONParser                     │
-│  - StandardMetricsRepository            │
+│      Infrastructure Layer                                       │
+│  - LoRAAdapter (PEFT, transformers)                 │
+│  - HuggingFaceInferenceAdapter                      │
+│  - RobustJSONParser                                         │
+│  - StandardMetricsRepository                           │
 └─────────────────────────────────────────┘
 ```
 

@@ -80,7 +80,7 @@ class InferenceEngine(ABC):
         sentence: str,
         context_before: str | None = None,
         context_after: str | None = None,
-        knowledge_base_text: str | None = None,
+        kb_text: str | None = None,
     ) -> str:
         """Generate a justification for the given sentence.
 
@@ -102,7 +102,7 @@ class InferenceEngine(ABC):
     def batch_generate(
         self,
         examples: list[LabeledExample],
-        knowledge_base_text: str,
+        kb_text: str,
     ) -> list[str]:
         """Generate justifications for a batch of examples.
 

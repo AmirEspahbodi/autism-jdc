@@ -585,11 +585,7 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
         except Exception as e:
             raise InferenceError(f"Generation failed: {str(e)}") from e
 
-    def batch_generate(
-        self,
-        examples: list[LabeledExample],
-        knowledge_base_text: str,
-    ) -> list[str]:
+    def batch_generate(self, examples: list[LabeledExample], kb_text: str) -> list[str]:
         """
         Generate justifications for a batch of examples.
 
@@ -603,13 +599,45 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
         Raises:
             InferenceError: If generation fails.
         """
-        outputs = []
-        for example in examples:
-            output = self.generate_justification(
-                sentence=example.sentence,
-                context_before=example.context_before,
-                context_after=example.context_after,
-                knowledge_base_text=knowledge_base_text,
+
+        # Build all prompts
+        prompts = [
+            PromptTemplate.build_inference_prompt(
+                sentence=ex.sentence,
+                kb_text=kb_text,
+                context_before=ex.context_before,
+                context_after=ex.context_after,
             )
-            outputs.append(output)
-        return outputs
+            for ex in examples
+        ]
+
+        # Tokenize batch with left padding (already set in _load_model)
+        inputs = self.tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,  # ← Pad to longest in batch
+            truncation=True,
+            max_length=self.config.training_hyperparameters.max_seq_length,
+        ).to(self.model.device)
+
+        # Batch generation
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=self.config.inference_config.max_new_tokens,
+                temperature=self.config.inference_config.temperature,
+                # ... other params
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
+
+        # Decode outputs (skip input tokens for each example)
+        results = []
+        for i, output in enumerate(outputs):
+            input_length = inputs.input_ids[i].shape[0]
+            generated = self.tokenizer.decode(
+                output[input_length:],
+                skip_special_tokens=True,
+            )
+            results.append(generated.strip())
+
+        return results
