@@ -1,6 +1,6 @@
 """
 Infrastructure LLM module - Concrete implementations for LLM training and inference.
-Refactored to support Pre-formatted SFT data without dynamic prompt assembly.
+Refactored to fix SFT masking alignment and EOS/BOS token handling.
 """
 
 import json
@@ -59,7 +59,6 @@ class PromptTemplate:
             return {"input": example.input_prompt, "output": example.model_output}
 
         # Case 2: Legacy Structured Data (Fallback)
-        # Simplified for this refactor to focus on the request:
         raise NotImplementedError(
             "Legacy prompt construction is deprecated in this refactor."
         )
@@ -80,6 +79,10 @@ class PromptTemplate:
 
 class LoRAAdapter(LLMTrainer):
     """Adapter for fine-tuning LLMs using LoRA."""
+
+    # CONSTANT SEPARATOR for Robust Masking
+    # This ensures the DataCollator always finds the split point, regardless of model type.
+    RESPONSE_SEPARATOR = "\n### Response:\n"
 
     def __init__(self, config: SystemConfig) -> None:
         self.config = config
@@ -121,22 +124,20 @@ class LoRAAdapter(LLMTrainer):
         )
 
         # ---------------------------------------------------------------------
-        # FIX FOR BUG 1: Stop Token Blindness (EOS == PAD)
+        # FIX 1: EOS Token Blindness & BOS Duplication
         # ---------------------------------------------------------------------
-        # Instead of setting pad_token = eos_token (which masks EOS in loss),
-        # we ensure a distinct padding token exists.
+        # 1. Disable automatic BOS adding. We want control or to rely on the prompt text.
+        #    Llama 3 often adds BOS automatically, leading to double BOS if not handled.
+        self.tokenizer.add_bos_token = False
+
+        # 2. Add PAD token if missing (Essential for SFTTrainer/Collator)
         if self.tokenizer.pad_token is None:
             print("Adding distinct [PAD] token to tokenizer...")
             self.tokenizer.add_special_tokens({"pad_token": "[PAD]"})
-            # CRITICAL: Resize embeddings so the model knows about the new token
             self.model.resize_token_embeddings(len(self.tokenizer))
 
-        # Ensure padding side is right for Training (SFTTrainer requirement usually)
-        # Note: Inference usually prefers left-padding, but SFTTrainer handles right-padding best.
+        # 3. Set padding side to right for SFTTrainer compatibility
         self.tokenizer.padding_side = "right"
-
-        if hasattr(self.tokenizer, "add_bos_token"):
-            self.tokenizer.add_bos_token = False
 
     def _prepare_peft_model(self) -> None:
         self.model = prepare_model_for_kbit_training(self.model)
@@ -158,54 +159,55 @@ class LoRAAdapter(LLMTrainer):
     def _format_examples_for_training(
         self,
         examples: list[LabeledExample],
-        kb_text: str,  # Ignored for pre-formatted
+        kb_text: str,
     ) -> Dataset:
         """
-        Refactored to return a HuggingFace Dataset containing raw text.
-        NO manual tokenization or padding is performed here.
+        Refactored to inject the robust separator explicitly.
+        Structure: [Input] + [Separator] + [Output] + [EOS]
         """
         data_list = []
 
         for example in examples:
             prompt_data = PromptTemplate.build_training_prompt(example)
 
-            # Construct the full text string.
-            # We explicitly append EOS to ensure the model learns to stop.
+            # -----------------------------------------------------------------
+            # FIX 2: Explicit Template Injection
+            # -----------------------------------------------------------------
+            # We explicitly inject the separator so the Collator can find it.
+            # We also append the EOS token string to ensure the model learns to stop.
             full_text = (
-                prompt_data["input"] + prompt_data["output"] + self.tokenizer.eos_token
+                f"{prompt_data['input']}"
+                f"{self.RESPONSE_SEPARATOR}"
+                f"{prompt_data['output']}"
+                f"{self.tokenizer.eos_token}"
             )
 
             data_list.append({"text": full_text})
 
-        # Return a standard HF Dataset which SFTTrainer expects
         return Dataset.from_list(data_list)
 
     def _prepare_data_collator(self):
-        from src.config import ModelType
+        """
+        Refactored to use the explicit separator for masking.
+        Do NOT guess the template based on ModelType.
+        """
 
-        response_template_ids = None
+        # -----------------------------------------------------------------
+        # FIX 3: Robust Masking Configuration
+        # -----------------------------------------------------------------
+        # Use the exact same string we injected in `_format_examples_for_training`.
+        response_template_str = self.RESPONSE_SEPARATOR
 
-        if self.config.model_type == ModelType.LLAMA3_8B:
-            template_str = "<|start_header_id|>assistant<|end_header_id|>\n\n"
-            response_template_ids = self.tokenizer.encode(
-                template_str, add_special_tokens=False
-            )
-        elif self.config.model_type == ModelType.MISTRAL_7B:
-            template_str = "[/INST]"
-            response_template_ids = self.tokenizer.encode(
-                template_str, add_special_tokens=False
-            )
+        # We generally do not need to encode it manually; the Collator accepts the string.
+        # However, to be safe against tokenizer edge cases (like whitespace stripping),
+        # passing the string is usually preferred for `response_template`.
 
-        if not response_template_ids:
-            template_str = "assistant"
-            response_template_ids = self.tokenizer.encode(
-                template_str, add_special_tokens=False
-            )
-
-        print(f"✓ Data collator configured. Masking inputs before: {template_str}")
+        print(
+            f"✓ Data collator configured. Masking inputs before: {repr(response_template_str)}"
+        )
 
         data_collator = DataCollatorForCompletionOnlyLM(
-            response_template=response_template_ids,
+            response_template=response_template_str,
             tokenizer=self.tokenizer,
             mlm=False,
         )
@@ -221,10 +223,6 @@ class LoRAAdapter(LLMTrainer):
             self._prepare_peft_model()
             kb_text = ""
 
-            # -----------------------------------------------------------------
-            # FIX FOR BUG 2: Manual Tokenization Anti-Pattern
-            # -----------------------------------------------------------------
-            # We now get datasets of raw strings, not pre-tokenized tensors.
             train_dataset = self._format_examples_for_training(
                 training_examples, kb_text
             )
@@ -252,16 +250,14 @@ class LoRAAdapter(LLMTrainer):
                 optim=self.config.training_hyperparameters.optim,
                 save_total_limit=3,
                 report_to=["none"],
-                remove_unused_columns=False,  # Essential when using dataset_text_field
+                remove_unused_columns=False,
             )
 
-            # Initialize SFTTrainer with the raw text dataset.
-            # SFTTrainer will handle tokenization and packing/padding internally.
             trainer = SFTTrainer(
                 model=self.peft_model,
                 train_dataset=train_dataset,
                 eval_dataset=eval_dataset,
-                dataset_text_field="text",  # Tells SFTTrainer which column to tokenize
+                dataset_text_field="text",
                 args=training_args,
                 data_collator=data_collator,
                 max_seq_length=self.config.training_hyperparameters.max_seq_length,
@@ -305,8 +301,6 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
     def _load_model(self) -> None:
         print(f"Loading base model for inference: {self.config.model_type.value}")
 
-        # Load Base Model
-        # Note: We usually use 4-bit/8-bit for inference if configured, similar to training
         if self.config.quantization_config.quantization_type.value != "none":
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=(
@@ -335,10 +329,11 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                 print("Adding distinct [PAD] token to tokenizer (matching training)...")
                 self.tokenizer.add_special_tokens({"pad_token": "[PAD]"})
 
+            # Ensure BOS settings match training
             if hasattr(self.tokenizer, "add_bos_token"):
                 self.tokenizer.add_bos_token = False
 
-            # Configure for inference (left padding is standard for generation)
+            # Configure for inference
             self.tokenizer.padding_side = "left"
 
             # 3. Load Base Model
@@ -350,8 +345,6 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                 cache_dir=str(self.config.cache_dir),
             )
 
-            # This ensures the base model has the same vocabulary size as expected by the LoRA adapter.
-            # Without this, loading the adapter throws a RuntimeError due to size mismatch.
             print(f"Resizing model embeddings to {len(self.tokenizer)}...")
             base_model.resize_token_embeddings(len(self.tokenizer))
 
@@ -359,7 +352,6 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
             print(f"Loading LoRA adapter from: {self.model_path}")
             self.model = PeftModel.from_pretrained(base_model, self.model_path)
 
-            # Ensure pad_token_id is synced
             if self.tokenizer.pad_token_id is not None:
                 self.model.config.pad_token_id = self.tokenizer.pad_token_id
 
@@ -374,10 +366,7 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
         kb_text: str | None = None,
     ) -> str:
         """Single generation (Legacy/Wrapper)."""
-        # Create a temporary example to leverage common logic if needed,
-        # but for SFT we normally prefer batch_generate with full prompts.
-        # This is a fallback implementation.
-        prompt = f"{kb_text or ''}\n{context_before or ''}\n{sentence}\n{context_after or ''}"
+        prompt = f"{kb_text or ''}\n{context_before or ''}\n{sentence}\n{context_after or ''}{LoRAAdapter.RESPONSE_SEPARATOR}"
 
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
 
@@ -394,7 +383,7 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
     def batch_generate(
         self,
         examples: list[LabeledExample],
-        kb_text: str,  # Kept for interface consistency, might be unused in SFT
+        kb_text: str,
     ) -> list[str]:
         """
         Generate completions for a batch of examples.
@@ -403,23 +392,27 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
         if not examples:
             return []
 
-        # Extract prompts. Ensure we rely on the pre-formatted input_prompt
-        prompts = [ex.input_prompt for ex in examples if ex.input_prompt]
+        # Update: We should likely append the separator here too if the input_prompt
+        # doesn't contain it, but SFT input_prompts usually end where the model should start.
+        # Assuming input_prompt is the question/instruction.
+        prompts = []
+        for ex in examples:
+            if ex.input_prompt:
+                # Append separator to prompt trigger generation
+                p = f"{ex.input_prompt}{LoRAAdapter.RESPONSE_SEPARATOR}"
+                prompts.append(p)
 
         if not prompts:
             raise InferenceError("No valid input_prompts found in examples.")
 
         results = []
-        batch_size = (
-            self.config.training_hyperparameters.batch_size
-        )  # Reuse batch size or define new
+        batch_size = self.config.training_hyperparameters.batch_size
 
         print(f"Starting inference on {len(prompts)} examples...")
 
         for i in range(0, len(prompts), batch_size):
             batch_prompts = prompts[i : i + batch_size]
 
-            # Tokenize
             inputs = self.tokenizer(
                 batch_prompts,
                 return_tensors="pt",
@@ -441,20 +434,11 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                     pad_token_id=self.tokenizer.pad_token_id,
                 )
 
-            # Decode
-            # We only want the *new* tokens, not the input prompt
             decoded_batch = []
             for j, output in enumerate(outputs):
+                # Slice off the prompt length to return ONLY new tokens
                 input_len = inputs.input_ids[j].shape[0]
-                # In some cases generate returns input + output.
-                # We slice off the input length if it matches.
-                # However, with padding, calculating exact input length per row is tricky
-                # if not careful.
-                # Safer approach: decode full and strip prompt, or slice strictly by generated tokens.
-
-                # Standard approach for causal LM generation in HF often returns full sequence.
-                # Let's decode only the new tokens.
-                generated_tokens = output[inputs.input_ids.shape[1] :]
+                generated_tokens = output[input_len:]
                 text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
                 decoded_batch.append(text)
 
