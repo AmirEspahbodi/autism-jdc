@@ -47,7 +47,7 @@ def get_training_data_loader(config: SystemConfig):
     """Factory to select the appropriate training data loader."""
     # Strict Policy: Only SFT Pre-formatted dataset (dataset.json) is allowed.
     # Unsafe fallbacks to legacy loaders have been removed to prevent runtime instability.
-    sft_path = config.data_dir / "dataset.json"
+    sft_path = config.data_dir / "_train_dataset.json"
 
     if not sft_path.exists():
         print(f"✗ Critical: dataset.json not found at {sft_path}")
@@ -61,7 +61,7 @@ def get_training_data_loader(config: SystemConfig):
 def get_evaluation_data_loader(config: SystemConfig):
     """Factory to select the appropriate evaluation data loader."""
     # Strict Policy: Only SFT Pre-formatted test dataset (test_dataset.json) is allowed.
-    sft_test_path = config.data_dir / "test_dataset.json"
+    sft_test_path = config.data_dir / "_test_dataset.json"
 
     if not sft_test_path.exists():
         print(f"✗ Critical: test_dataset.json not found at {sft_test_path}")

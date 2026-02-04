@@ -21,9 +21,9 @@ class PreformattedDataLoader(DataLoader):
 
     def __init__(
         self,
-        train_path: Path = Path("./dataset/dataset.json"),
-        test_path: Path = Path("./dataset/test_dataset.json"),
-        val_path: Path = Path("./dataset/val_dataset.json"),
+        train_path: Path = Path("./dataset/_train_dataset.json"),
+        test_path: Path = Path("./dataset/_test_dataset.json"),
+        val_path: Path = Path("./dataset/_validation_dataset.json"),
         val_split_ratio: float = 0.1,
         seed: int = 42,
     ) -> None:
