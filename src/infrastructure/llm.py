@@ -312,3 +312,194 @@ class LoRAAdapter(LLMTrainer):
 
     def load_model(self, model_path: str) -> None:
         pass  # Implementation omitted for brevity
+
+
+class HuggingFaceInferenceAdapter(InferenceEngine):
+    """Adapter for running inference with a fine-tuned model."""
+
+    def __init__(self, config: SystemConfig, model_path: str) -> None:
+        self.config = config
+        self.model_path = model_path
+        self.model: Optional[PeftModel] = None
+        self.tokenizer: Optional[AutoTokenizer] = None
+        self._load_model()
+
+    def _load_model(self) -> None:
+        """Load the fine-tuned model for inference."""
+        print(f"Loading fine-tuned model from: {self.model_path}")
+
+        if self.config.quantization_config.quantization_type.value != "none":
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=(
+                    self.config.quantization_config.quantization_type.value == "4bit"
+                ),
+                load_in_8bit=(
+                    self.config.quantization_config.quantization_type.value == "8bit"
+                ),
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_quant_type=self.config.quantization_config.bnb_4bit_quant_type,
+                bnb_4bit_use_double_quant=self.config.quantization_config.bnb_4bit_use_double_quant,
+            )
+        else:
+            bnb_config = None
+
+        base_model = AutoModelForCausalLM.from_pretrained(
+            self.config.model_type.value,
+            quantization_config=bnb_config,
+            device_map="auto",
+            trust_remote_code=True,
+            cache_dir=str(self.config.cache_dir),
+        )
+
+        self.model = PeftModel.from_pretrained(
+            base_model,
+            self.model_path,
+            is_trainable=False,
+        )
+
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+        self.tokenizer.padding_side = "left"
+
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.model.config.pad_token_id = self.tokenizer.eos_token_id
+
+        if hasattr(self.tokenizer, "add_bos_token"):
+            self.tokenizer.add_bos_token = False
+            print("✓ Disabled tokenizer.add_bos_token for inference (matches training)")
+
+        self._validate_bos_tokens()
+        self.model.eval()
+        print(
+            f"✓ Model loaded for inference (padding_side={self.tokenizer.padding_side})"
+        )
+
+    def _validate_bos_tokens(self) -> None:
+        """Validate that chat template produces exactly one BOS token."""
+        test_messages = [
+            {"role": "system", "content": "Test system message"},
+            {"role": "user", "content": "Test user message"},
+        ]
+
+        token_ids = self.tokenizer.apply_chat_template(
+            test_messages,
+            tokenize=True,
+            add_generation_prompt=True,
+        )
+
+        if isinstance(token_ids, list):
+            token_ids = torch.tensor(token_ids)
+
+        bos_count = (token_ids == self.tokenizer.bos_token_id).sum().item()
+
+        if bos_count > 1:
+            raise ValueError(
+                f"Double BOS token detected in inference! Found {bos_count} BOS tokens."
+            )
+
+        print(f"✓ BOS token validation passed for inference ({bos_count} BOS token)")
+
+    def generate_justification(
+        self,
+        sentence: str,
+        context_before: Optional[str] = None,
+        context_after: Optional[str] = None,
+        knowledge_base_text: Optional[str] = None,
+    ) -> str:
+        """Generate a justification for a single sentence."""
+        try:
+            messages = PromptTemplate.build_inference_prompt(
+                sentence=sentence,
+                kb_text=knowledge_base_text,
+                context_before=context_before,
+                context_after=context_after,
+            )
+
+            # CRITICAL FIX: Use tokenize=True directly.
+            # Do NOT generate string and then re-tokenize.
+            inputs = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_tensors="pt",
+                return_dict=True,
+            ).to(self.model.device)
+
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=self.config.inference_config.max_new_tokens,
+                    temperature=self.config.inference_config.temperature,
+                    top_p=self.config.inference_config.top_p,
+                    top_k=self.config.inference_config.top_k,
+                    do_sample=self.config.inference_config.do_sample,
+                    repetition_penalty=self.config.inference_config.repetition_penalty,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
+
+            # Decode (skip the input prompt)
+            generated_text = self.tokenizer.decode(
+                outputs[0][inputs.input_ids.shape[1] :],
+                skip_special_tokens=True,
+            )
+
+            return generated_text.strip()
+
+        except Exception as e:
+            raise InferenceError(f"Generation failed: {str(e)}") from e
+
+    def batch_generate(self, examples: list[LabeledExample], kb_text: str) -> list[str]:
+        """Generate justifications for a batch of examples."""
+        try:
+            # We need to tokenize individually first to handle chat template logic
+            # for each example, then pad them together.
+            batch_input_ids = []
+
+            for ex in examples:
+                messages = PromptTemplate.build_inference_prompt(
+                    sentence=ex.sentence,
+                    kb_text=kb_text,
+                    context_before=ex.context_before,
+                    context_after=ex.context_after,
+                )
+
+                # Get IDs directly (1D tensor)
+                encoded = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    return_tensors="pt",
+                )
+                batch_input_ids.append(encoded[0])  # Append the 1D tensor
+
+            # Use tokenizer to pad the list of tensors
+            # This handles attention_mask creation automatically
+            inputs = self.tokenizer.pad(
+                {"input_ids": batch_input_ids}, padding=True, return_tensors="pt"
+            ).to(self.model.device)
+
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=self.config.inference_config.max_new_tokens,
+                    temperature=self.config.inference_config.temperature,
+                    top_p=self.config.inference_config.top_p,
+                    top_k=self.config.inference_config.top_k,
+                    do_sample=self.config.inference_config.do_sample,
+                    repetition_penalty=self.config.inference_config.repetition_penalty,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
+
+            results = []
+            for i, output in enumerate(outputs):
+                input_length = inputs.input_ids[i].shape[0]
+                generated = self.tokenizer.decode(
+                    output[input_length:],
+                    skip_special_tokens=True,
+                )
+                results.append(generated.strip())
+
+            return results
+
+        except Exception as e:
+            raise InferenceError(f"Batch generation failed: {str(e)}") from e
