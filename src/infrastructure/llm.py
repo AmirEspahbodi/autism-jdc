@@ -154,13 +154,21 @@ class LoRAAdapter(LLMTrainer):
         data_list = []
 
         for example in examples:
-            # Check for Pre-formatted SFT data (Fix: Logic/Corruption)
+            # Check for Pre-formatted SFT data (Fix: Loss Masking)
             if example.input_prompt is not None and example.model_output is not None:
-                # BYPASS apply_chat_template. Concatenate directly.
-                # Since the prompt is pre-formatted, we just need to join input + output.
-                # CRITICAL: Append EOS token so the model knows when to stop generating.
-                eos_token = self.tokenizer.eos_token if self.tokenizer.eos_token else ""
-                full_text = f"{example.input_prompt}{example.model_output}{eos_token}"
+                # Apply chat template to SFT data to preserve structural markers for loss masking
+                messages = [
+                    {"role": "user", "content": example.input_prompt},
+                    {"role": "assistant", "content": example.model_output},
+                ]
+
+                # Generate properly structured text with role separators
+                full_text = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=False,  # Don't add prompt suffix (we have the response)
+                )
+
                 data_list.append({"text": full_text})
             else:
                 # Legacy / Structured Data Path
@@ -224,6 +232,14 @@ class LoRAAdapter(LLMTrainer):
                 response_template = "### Response:\n"
 
             print(f"  Falling back to heuristic: {repr(response_template)}")
+
+        # Validate response template was successfully derived
+        if not response_template or not response_template.strip():
+            raise ValueError(
+                "Failed to derive response template from tokenizer. "
+                "Data collator cannot mask input tokens without a valid separator. "
+                f"Model type: {self.config.model_type.value}"
+            )
 
         print(
             f"✓ Data collator configured using response template: {repr(response_template)}"
