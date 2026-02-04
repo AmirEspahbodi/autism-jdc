@@ -312,8 +312,14 @@ Examples:
     )
     args = parser.parse_args()
 
-    # login(token=args.hf_token)
-    # Create configuration
+    if hf_token:
+        print("✓ Authenticating with Hugging Face...")
+        login(token=hf_token)
+    else:
+        print(
+            "⚠ Warning: No Hugging Face token provided. Gated models (Llama 3) may fail."
+        )
+
     from src.config import ModelType
 
     config = SystemConfig(
