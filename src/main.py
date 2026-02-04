@@ -287,7 +287,7 @@ Examples:
     args = parser.parse_args()
 
     # Create configuration
-    from config import ModelType
+    from src.config import ModelType
 
     config = SystemConfig(
         model_type=ModelType.LLAMA3_8B
