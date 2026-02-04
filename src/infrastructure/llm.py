@@ -178,20 +178,42 @@ class LoRAAdapter(LLMTrainer):
     def _prepare_data_collator(self):
         """
         Configure the data collator with the correct response separator
-        based on the ModelType.
+        dynamically derived from the tokenizer.
         """
-        # Determine the response template string that the Collator needs to find
-        # to start calculating loss (masking the instruction).
+        # Create a dummy user message to detect the template structure
+        # We use a placeholder content that won't confuse regex logic
+        messages = [{"role": "user", "content": "DETECT_RESPONSE_TEMPLATE"}]
 
-        if "llama-3" in self.config.model_type.value.lower():
-            # Llama 3 specific header for assistant turn
-            response_template = "<|start_header_id|>assistant<|end_header_id|>\n\n"
-        elif "mistral" in self.config.model_type.value.lower():
-            # Standard Mistral instruction end
-            response_template = "[/INST]"
-        else:
-            # Fallback for generic models, though specific template is preferred
-            response_template = "### Response:\n"
+        # 1. Apply template WITHOUT generation prompt (just the user instruction)
+        prompt_no_gen = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=False
+        )
+
+        # 2. Apply template WITH generation prompt (includes the assistant start token)
+        prompt_with_gen = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
+        # 3. Extract the response template (the difference between the two)
+        response_template = ""
+        if prompt_with_gen.startswith(prompt_no_gen):
+            response_template = prompt_with_gen[len(prompt_no_gen) :]
+
+        # 4. Fallback Logic:
+        # If the diff is empty (common in older templates that don't support add_generation_prompt)
+        # or if derivation failed, we try heuristics or standard templates.
+        if not response_template.strip():
+            print(
+                "⚠ Warning: Could not dynamically derive response template via suffix diff."
+            )
+            if "[/INST]" in prompt_no_gen:
+                # Mistral / Llama 2 style where the closing tag IS the separator
+                response_template = "[/INST]"
+            else:
+                # Generic fallback (Instruction format)
+                response_template = "### Response:\n"
+
+            print(f"  Falling back to heuristic: {repr(response_template)}")
 
         print(
             f"✓ Data collator configured using response template: {repr(response_template)}"
