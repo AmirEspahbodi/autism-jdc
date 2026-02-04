@@ -10,68 +10,47 @@ from typing import Optional
 from src.domain import DataLoader, DataLoadError, Justification, LabeledExample
 
 
-class MockDataLoader(DataLoader):
-    """Mock data loader that generates synthetic AUTALIC-like examples.
-    (Kept for backward compatibility/testing)
+class PreformattedDataLoader(DataLoader):
+    """Data loader for pre-formatted SFT datasets.
+
+    Reads from JSON files where inputs are already fully formatted.
+    Supports both training (dataset.json) and testing (test_dataset.json) splits.
     """
 
     def __init__(
         self,
-        num_train_examples: int = 50,
-        num_test_examples: int = 20,
-        seed: int = 42,
+        train_path: Path = Path("./dataset/dataset.json"),
+        test_path: Path = Path("./dataset/test_dataset.json"),
     ) -> None:
-        self.num_train_examples = num_train_examples
-        self.num_test_examples = num_test_examples
-        self.seed = seed
-
-    def load_training_data(self) -> list[LabeledExample]:
-        return self._generate_examples(self.num_train_examples, offset=0)
-
-    def load_validation_data(self) -> list[LabeledExample]:
-        return self._generate_examples(self.num_test_examples, offset=500)
-
-    def load_test_data(self) -> list[LabeledExample]:
-        return self._generate_examples(self.num_test_examples, offset=1000)
-
-    def _generate_examples(self, count: int, offset: int = 0) -> list[LabeledExample]:
-        examples = []
-        # (Simplified for brevity - logic remains same as original but using keyword args)
-        # Note: In a real refactor, we would update this to optionally produce SFT format
-        # but leaving as-is for legacy struct support.
-        return []  # Placeholder to save space, original logic preserved
-
-
-class PreformattedDataLoader(DataLoader):
-    """Data loader for pre-formatted SFT datasets.
-
-    Reads from dataset.json where inputs are already fully formatted.
-    """
-
-    def __init__(self, data_path: Path = Path("./dataset/dataset.json")) -> None:
         """
         Args:
-            data_path: Path to the dataset.json file.
+            train_path: Path to the training dataset file.
+            test_path: Path to the test dataset file.
         """
-        self.data_path = data_path
+        self.train_path = train_path
+        self.test_path = test_path
 
-    def load_training_data(self) -> list[LabeledExample]:
-        """Load pre-formatted training data."""
-        if not self.data_path.exists():
-            raise DataLoadError(f"Dataset file not found at: {self.data_path}")
+    def _load_data_from_json(self, path: Path) -> list[LabeledExample]:
+        """Helper to load and validate SFT data from a JSON file."""
+        if not path.exists():
+            # Gracefully handle missing files by returning empty list
+            # This allows the pipeline to continue or fall back if needed
+            return []
 
         try:
-            with open(self.data_path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
             if not isinstance(data, list):
-                raise DataLoadError("Dataset must be a JSON list of objects.")
+                raise DataLoadError(
+                    f"Dataset at {path} must be a JSON list of objects."
+                )
 
             examples = []
             for i, item in enumerate(data):
                 if "input_prompt" not in item or "model_output" not in item:
                     raise DataLoadError(
-                        f"Item {i} missing 'input_prompt' or 'model_output'"
+                        f"Item {i} in {path} missing 'input_prompt' or 'model_output'"
                     )
 
                 examples.append(
@@ -84,22 +63,32 @@ class PreformattedDataLoader(DataLoader):
             return examples
 
         except json.JSONDecodeError as e:
-            raise DataLoadError(f"Invalid JSON in dataset file: {e}")
+            raise DataLoadError(f"Invalid JSON in dataset file {path}: {e}")
         except Exception as e:
-            raise DataLoadError(f"Failed to load dataset: {e}")
+            raise DataLoadError(f"Failed to load dataset from {path}: {e}")
+
+    def load_training_data(self) -> list[LabeledExample]:
+        """Load pre-formatted training data."""
+        if not self.train_path.exists():
+            raise DataLoadError(
+                f"Training dataset file not found at: {self.train_path}"
+            )
+
+        return self._load_data_from_json(self.train_path)
 
     def load_validation_data(self) -> list[LabeledExample]:
-        """Load validation data.
-        For now, this splits the training data or returns empty if not available separately.
-        """
-        # Simple implementation: Return empty list or implement split strategy
-        # Returning empty list as SFT usually relies on a separate val file or split
+        """Load validation data."""
+        # Future: could allow a separate val_path in __init__
         return []
 
     def load_test_data(self) -> list[LabeledExample]:
-        """Load test data."""
-        # Similar to validation, implement if test set exists in this format
-        return []
+        """Load pre-formatted test data."""
+        data = self._load_data_from_json(self.test_path)
+        if not data:
+            # Optional: Log warning here if strictly expected,
+            # but returning empty list adheres to contract.
+            pass
+        return data
 
 
 class FileBasedDataLoader(DataLoader):

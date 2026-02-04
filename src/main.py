@@ -27,7 +27,6 @@ from src.infrastructure import (
 # Importing directly from module to ensure access to PreformattedDataLoader
 from src.infrastructure.data_loader import (
     FileBasedDataLoader,
-    MockDataLoader,
     PreformattedDataLoader,
 )
 
@@ -66,7 +65,8 @@ def get_training_data_loader(config: SystemConfig):
     sft_path = config.data_dir / "dataset.json"
     if sft_path.exists():
         print(f"✓ Found SFT dataset at: {sft_path}")
-        return PreformattedDataLoader(data_path=sft_path)
+        # Updated to use specific 'train_path' argument
+        return PreformattedDataLoader(train_path=sft_path)
 
     # Priority 2: Legacy structured dataset (train.json)
     legacy_path = config.data_dir / "train.json"
@@ -75,30 +75,30 @@ def get_training_data_loader(config: SystemConfig):
         return FileBasedDataLoader(data_dir=config.data_dir)
 
     # Fallback: Mock data
-    print(
-        "⚠ No real dataset found (checked dataset.json/train.json). Using MockDataLoader."
-    )
-    return MockDataLoader(
-        num_train_examples=50,
-        num_test_examples=20,
-        seed=config.seed,
-    )
+    print("⚠ No real dataset found (checked dataset.json/train.json).")
+    sys.exit(1)
 
 
 def get_evaluation_data_loader(config: SystemConfig):
     """Factory to select the appropriate evaluation data loader."""
-    # Priority 1: Structured test set (test.json) for metrics
+    # Priority 1: SFT Pre-formatted test dataset (test_dataset.json)
+    # Checks for the standard SFT test file naming convention
+    sft_test_path = config.data_dir / "test_dataset.json"
+    if sft_test_path.exists():
+        print(f"✓ Found SFT test dataset at: {sft_test_path}")
+        # We inject the found path as 'test_path'.
+        # 'train_path' can default since it's unused in evaluation.
+        return PreformattedDataLoader(test_path=sft_test_path)
+
+    # Priority 2: Structured test set (test.json) for metrics
     test_path = config.data_dir / "test.json"
     if test_path.exists():
         print(f"✓ Found test dataset at: {test_path}")
         return FileBasedDataLoader(data_dir=config.data_dir)
 
     # Fallback: Mock data
-    print("⚠ No test.json found. Using MockDataLoader.")
-    return MockDataLoader(
-        num_test_examples=20,
-        seed=config.seed,
-    )
+    print("⚠ No test_dataset.json or test.json found.")
+    sys.exit(1)
 
 
 def run_fine_tuning(config: SystemConfig) -> None:

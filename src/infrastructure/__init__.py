@@ -7,7 +7,6 @@ concrete implementations of the domain interfaces.
 
 from src.infrastructure.data_loader import (
     FileBasedDataLoader,
-    MockDataLoader,
     PreformattedDataLoader,
 )
 from src.infrastructure.llm import (
@@ -30,7 +29,6 @@ __all__ = [
     # Data Loaders
     "FileBasedDataLoader",
     "PreformattedDataLoader",
-    "MockDataLoader",
     # LLM Adapters
     "LoRAAdapter",
     "HuggingFaceInferenceAdapter",
