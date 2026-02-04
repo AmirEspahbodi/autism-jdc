@@ -58,9 +58,9 @@ class LoRAConfig(BaseModel):
         description="Modules to apply LoRA (attention + MLP for full capacity)",
     )
 
-    modules_to_save: list[str] = Field(
-        default_factory=lambda: ["embed_tokens", "lm_head"],
-        description="Modules to save (embeddings) to handle added tokens like [PAD]",
+    modules_to_save: Optional[list[str]] = Field(
+        default=None,
+        description="Modules to fully fine-tune (e.g. 'embed_tokens', 'lm_head'). Only add these if adding NEW special tokens to the tokenizer; otherwise leave None to conserve memory.",
     )
 
     lora_dropout: float = Field(default=0.05, ge=0.0, le=0.5)
