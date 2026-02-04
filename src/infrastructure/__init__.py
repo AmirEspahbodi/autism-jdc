@@ -5,9 +5,12 @@ This package contains all the external framework dependencies and
 concrete implementations of the domain interfaces.
 """
 
-from src.infrastructure.data_loader import FileBasedDataLoader, MockDataLoader
+from src.infrastructure.data_loader import (
+    FileBasedDataLoader,
+    MockDataLoader,
+    PreformattedDataLoader,
+)
 from src.infrastructure.llm import (
-    HuggingFaceInferenceAdapter,
     LoRAAdapter,
     PromptTemplate,
 )
@@ -25,9 +28,9 @@ from src.infrastructure.parsing import (
 __all__ = [
     # Data Loaders
     "FileBasedDataLoader",
+    "PreformattedDataLoader",
     "MockDataLoader",
     # LLM Adapters
-    "HuggingFaceInferenceAdapter",
     "LoRAAdapter",
     "PromptTemplate",
     # Metrics and Reporting

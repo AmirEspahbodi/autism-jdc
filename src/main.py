@@ -14,14 +14,21 @@ import torch
 
 from src.application import EvaluateModelUseCase, FineTuneModelUseCase
 from src.config import KnowledgeBaseConfig, SystemConfig
+
+# Updated imports to include real data loaders
 from src.infrastructure import (
     ConsoleReportGenerator,
     DetailedReportGenerator,
-    HuggingFaceInferenceAdapter,
     LenientJSONParser,
     LoRAAdapter,
-    MockDataLoader,
     StandardMetricsRepository,
+)
+
+# Importing directly from module to ensure access to PreformattedDataLoader
+from src.infrastructure.data_loader import (
+    FileBasedDataLoader,
+    MockDataLoader,
+    PreformattedDataLoader,
 )
 
 
@@ -53,6 +60,47 @@ def check_gpu() -> None:
         print("  Consider using Google Colab or a GPU-enabled environment.")
 
 
+def get_training_data_loader(config: SystemConfig):
+    """Factory to select the appropriate training data loader."""
+    # Priority 1: SFT Pre-formatted dataset (dataset.json)
+    sft_path = config.data_dir / "dataset.json"
+    if sft_path.exists():
+        print(f"✓ Found SFT dataset at: {sft_path}")
+        return PreformattedDataLoader(data_path=sft_path)
+
+    # Priority 2: Legacy structured dataset (train.json)
+    legacy_path = config.data_dir / "train.json"
+    if legacy_path.exists():
+        print(f"✓ Found structured dataset at: {legacy_path}")
+        return FileBasedDataLoader(data_dir=config.data_dir)
+
+    # Fallback: Mock data
+    print(
+        "⚠ No real dataset found (checked dataset.json/train.json). Using MockDataLoader."
+    )
+    return MockDataLoader(
+        num_train_examples=50,
+        num_test_examples=20,
+        seed=config.seed,
+    )
+
+
+def get_evaluation_data_loader(config: SystemConfig):
+    """Factory to select the appropriate evaluation data loader."""
+    # Priority 1: Structured test set (test.json) for metrics
+    test_path = config.data_dir / "test.json"
+    if test_path.exists():
+        print(f"✓ Found test dataset at: {test_path}")
+        return FileBasedDataLoader(data_dir=config.data_dir)
+
+    # Fallback: Mock data
+    print("⚠ No test.json found. Using MockDataLoader.")
+    return MockDataLoader(
+        num_test_examples=20,
+        seed=config.seed,
+    )
+
+
 def run_fine_tuning(config: SystemConfig) -> None:
     """Execute the fine-tuning pipeline.
 
@@ -71,13 +119,11 @@ def run_fine_tuning(config: SystemConfig) -> None:
 
     # Infrastructure Layer: Concrete implementations
     trainer = LoRAAdapter(config)
-    data_loader = MockDataLoader(
-        num_train_examples=50,  # Small for demonstration
-        num_test_examples=20,
-        seed=config.seed,
-    )
 
-    print("✓ Adapters initialized")
+    # [FIX] Use Factory for Real Data
+    data_loader = get_training_data_loader(config)
+
+    print(f"✓ Adapters initialized (Loader: {data_loader.__class__.__name__})")
 
     # Application Layer: Use case
     fine_tune_use_case = FineTuneModelUseCase(
@@ -88,11 +134,15 @@ def run_fine_tuning(config: SystemConfig) -> None:
 
     # Execute
     try:
+        # Note: Validation requires separate logic depending on the loader,
+        # here we assume the loader handles split or returns empty if not available.
         fine_tune_use_case.execute(use_validation=True)
         print("\n✓ Fine-tuning completed successfully!")
         return True
     except Exception as e:
         print(f"\n✗ Fine-tuning failed: {str(e)}")
+        # import traceback
+        # traceback.print_exc()
         return False
 
 
@@ -122,13 +172,12 @@ def run_evaluation(config: SystemConfig) -> None:
     metrics_repo = StandardMetricsRepository()
     report_generator = DetailedReportGenerator()
     console_reporter = ConsoleReportGenerator()
-    data_loader = MockDataLoader(
-        num_test_examples=20,
-        seed=config.seed,
-    )
     kb_config = KnowledgeBaseConfig()
 
-    print("✓ Adapters initialized")
+    # [FIX] Use Factory for Real Data
+    data_loader = get_evaluation_data_loader(config)
+
+    print(f"✓ Adapters initialized (Loader: {data_loader.__class__.__name__})")
 
     # Application Layer: Use case
     evaluate_use_case = EvaluateModelUseCase(
@@ -146,7 +195,6 @@ def run_evaluation(config: SystemConfig) -> None:
         metrics = evaluate_use_case.execute(output_base)
 
         # Also print to console
-        predictions_for_console = []  # Would need to extract from use case
         console_reporter.generate_report([], metrics)
 
         print("\n✓ Evaluation completed successfully!")
@@ -210,6 +258,9 @@ Examples:
 
   # Custom output directory
   python main.py --output-dir ./my_results
+
+  # Custom data directory (where dataset.json or train.json is located)
+  python main.py --data-dir ./my_data
         """,
     )
 
@@ -234,6 +285,14 @@ Examples:
         type=str,
         default="./outputs",
         help="Output directory for models and results (default: ./outputs)",
+    )
+
+    # Added explicit data-dir argument support
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default="./data",
+        help="Directory containing dataset.json, train.json, or test.json (default: ./data)",
     )
 
     parser.add_argument(
@@ -267,6 +326,7 @@ Examples:
         if args.model == "llama3"
         else ModelType.MISTRAL_7B,
         output_dir=Path(args.output_dir),
+        data_dir=Path(args.data_dir),
     )
 
     # Override hyperparameters from CLI
