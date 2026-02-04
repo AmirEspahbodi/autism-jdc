@@ -108,14 +108,12 @@ class LoRAAdapter(LLMTrainer):
             device_map="auto",
             trust_remote_code=True,
             cache_dir=str(self.config.cache_dir),
-            token=self.config.hf_token,
         )
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.config.model_type.value,
             trust_remote_code=True,
             cache_dir=str(self.config.cache_dir),
-            token=self.config.hf_token,
         )
 
         # 1. We DO NOT resize embeddings on quantized models. It corrupts weights.
@@ -136,7 +134,6 @@ class LoRAAdapter(LLMTrainer):
                 device_map="auto",
                 trust_remote_code=True,
                 cache_dir=str(self.config.cache_dir),
-                token=self.config.hf_token,
             )
 
             # Update: Added token=self.config.hf_token
@@ -144,7 +141,6 @@ class LoRAAdapter(LLMTrainer):
                 self.config.model_type.value,
                 trust_remote_code=True,
                 cache_dir=str(self.config.cache_dir),
-                token=self.config.hf_token,
             )
 
     def _prepare_peft_model(self) -> None:
@@ -385,7 +381,6 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                 self.config.model_type.value,
                 trust_remote_code=True,
                 cache_dir=str(self.config.cache_dir),
-                token=self.config.hf_token,
             )
 
             # 2. Tokenizer Hygiene (Matching Training)
