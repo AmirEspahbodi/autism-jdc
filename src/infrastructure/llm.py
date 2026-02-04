@@ -337,88 +337,69 @@ class LoRAAdapter(LLMTrainer):
 
     def _prepare_data_collator(self):
         """
-        Create data collator that masks instruction tokens.
+        Create data collator that masks instruction tokens using explicit ID-based matching.
 
-        FIXED: ERROR #1 - Extracts exact response template with whitespace validation
+        Refactored to fix Tokenization Mismatch (Silent Bug):
+        - Previously passed a raw string to the collator, which caused re-tokenization errors
+          (splitting special tokens) and failed masking.
+        - Now encodes the response template into exact Token IDs.
+        - Handles Llama 3's specific header format and Mistral's instruction tag.
 
         Returns:
             DataCollatorForCompletionOnlyLM configured for the model.
         """
         from src.config import ModelType
 
-        # FIX ERROR #1: Extract the EXACT response template from chat template
-        # We need to include all whitespace/newlines that appear after the header
+        response_template_ids = None
 
-        # Create test messages to extract the exact template
-        test_messages = [
-            {"role": "system", "content": "Test"},
-            {"role": "user", "content": "Test"},
-            {"role": "assistant", "content": "ASSISTANT_RESPONSE_MARKER"},
-        ]
-
-        test_formatted = self.tokenizer.apply_chat_template(
-            test_messages,
-            tokenize=False,
-            add_generation_prompt=False,
-        )
-
-        # Extract everything from assistant header to the marker
-        # This captures the exact whitespace/newlines
         if self.config.model_type == ModelType.LLAMA3_8B:
-            # Find the assistant header
-            header_start = test_formatted.find(
-                "<|start_header_id|>assistant<|end_header_id|>"
-            )
-            if header_start == -1:
-                raise ValueError(
-                    "Could not find assistant header in chat template output. "
-                    "This will cause instruction masking to fail."
-                )
+            # Llama 3 Template: <|start_header_id|>assistant<|end_header_id|>\n\n
+            # We must encode this exact sequence. The tokenizer (when loaded correctly)
+            # will map the special token strings to their specific IDs (e.g., 128006, 78191, 128007, 271).
+            template_str = "<|start_header_id|>assistant<|end_header_id|>\n\n"
 
-            # Find the marker (this tells us where actual content starts)
-            marker_start = test_formatted.find(
-                "ASSISTANT_RESPONSE_MARKER", header_start
+            # encode(add_special_tokens=False) ensures we don't get an extra BOS token at the start
+            response_template_ids = self.tokenizer.encode(
+                template_str, add_special_tokens=False
             )
-            if marker_start == -1:
-                raise ValueError("Could not find response marker in template")
-
-            # Extract the template including whitespace
-            response_template = test_formatted[header_start:marker_start]
 
         elif self.config.model_type == ModelType.MISTRAL_7B:
-            # Mistral specific response pattern
-            header_start = test_formatted.find("[/INST]")
-            if header_start == -1:
-                raise ValueError(
-                    "Could not find Mistral response marker in chat template output. "
-                    "This will cause instruction masking to fail."
-                )
-
-            marker_start = test_formatted.find(
-                "ASSISTANT_RESPONSE_MARKER", header_start
+            # Mistral Template: [/INST]
+            # Standard Mistral chat template ends the user turn with this tag.
+            template_str = "[/INST]"
+            response_template_ids = self.tokenizer.encode(
+                template_str, add_special_tokens=False
             )
-            if marker_start == -1:
-                raise ValueError("Could not find response marker in template")
 
-            response_template = test_formatted[header_start:marker_start]
         else:
-            # Fallback - attempt to detect
-            # You can inspect: self.tokenizer.apply_chat_template(test_messages)
-            response_template = "assistant"
-            print(f"⚠ Warning: Using generic response template. May need adjustment.")
+            # Fallback for unknown models
+            # Uses a generic marker, though this is less robust than model-specific tokens
+            print(
+                f"⚠ Warning: Unknown model type {self.config.model_type}. Using generic 'assistant' template."
+            )
+            template_str = "assistant"
+            response_template_ids = self.tokenizer.encode(
+                template_str, add_special_tokens=False
+            )
 
-        # Validate that the template exists in actual formatted data
-        # This is critical - if template doesn't match, masking silently fails
-        print(f"✓ Response template extracted: {repr(response_template)}")
+        # Validation: Ensure we actually generated IDs
+        if not response_template_ids:
+            raise ValueError(
+                f"Critical Error: Failed to encode response template IDs for {self.config.model_type}. "
+                f"Tokenizer returned empty list for template: '{template_str}'"
+            )
 
+        print(f"✓ Response template encoded to IDs: {response_template_ids}")
+
+        # Pass the IDs (list of ints) instead of string to ensure exact matching
         data_collator = DataCollatorForCompletionOnlyLM(
-            response_template=response_template,
+            response_template=response_template_ids,
             tokenizer=self.tokenizer,
             mlm=False,  # Not masked language modeling
         )
 
         print(
-            f"✓ Data collator configured with response_template: {repr(response_template)}"
+            f"✓ Data collator configured with ID-based masking for: {self.config.model_type.value}"
         )
 
         return data_collator

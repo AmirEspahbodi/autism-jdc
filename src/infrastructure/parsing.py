@@ -118,8 +118,11 @@ class RobustJSONParser(JustificationParser):
             ParsingError: If no JSON can be found.
         """
         # Step 1: Remove markdown fences
-        text = re.sub(r"```(?:json)?\s*", "", text)
-        text = re.sub(r"```", "", text)
+        match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+        if match:
+            text = match.group(1)
+        else:
+            text = text
 
         # Step 2: Find first opening brace
         start_idx = text.find("{")
