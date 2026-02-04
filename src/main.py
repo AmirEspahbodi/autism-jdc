@@ -19,7 +19,6 @@ from src.config import KnowledgeBaseConfig, SystemConfig
 from src.infrastructure import (
     ConsoleReportGenerator,
     DetailedReportGenerator,
-    HuggingFaceInferenceAdapter,
     LenientJSONParser,
     LoRAAdapter,
     StandardMetricsRepository,
