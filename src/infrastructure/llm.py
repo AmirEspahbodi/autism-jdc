@@ -108,6 +108,7 @@ class LoRAAdapter(LLMTrainer):
             device_map="auto",
             trust_remote_code=True,
             cache_dir=str(self.config.cache_dir),
+            token=self.config.hf_token,
         )
 
         self.tokenizer = AutoTokenizer.from_pretrained(
