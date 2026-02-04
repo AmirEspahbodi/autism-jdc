@@ -314,7 +314,7 @@ Examples:
 
     if hf_token:
         print("✓ Authenticating with Hugging Face...")
-        login(token=hf_token)
+        login(token=args.hf_token)
     else:
         print(
             "⚠ Warning: No Hugging Face token provided. Gated models (Llama 3) may fail."
