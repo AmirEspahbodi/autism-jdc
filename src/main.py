@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import torch
+from huggingface_hub import login
 
 from src.application import EvaluateModelUseCase, FineTuneModelUseCase
 from src.config import KnowledgeBaseConfig, SystemConfig
@@ -311,6 +312,7 @@ Examples:
     )
     args = parser.parse_args()
 
+    # login(token=args.hf_token)
     # Create configuration
     from src.config import ModelType
 
@@ -320,6 +322,7 @@ Examples:
         else ModelType.MISTRAL_7B,
         output_dir=Path(args.output_dir),
         data_dir=Path(args.data_dir),
+        hf_token=args.hf_token,
     )
 
     # Override hyperparameters from CLI
