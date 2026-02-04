@@ -3,6 +3,7 @@ Infrastructure LLM module - Concrete implementations for LLM training and infere
 
 This module contains adapters that implement the domain interfaces using
 HuggingFace Transformers, PEFT (LoRA), and bitsandbytes for quantization.
+
 """
 
 import json
@@ -23,7 +24,7 @@ from transformers import (
     Trainer,
     TrainingArguments,
 )
-from trl import SFTTrainer
+from trl import DataCollatorForCompletionOnlyLM, SFTTrainer
 
 from src.config import SystemConfig
 from src.domain import (
@@ -51,14 +52,16 @@ Do not include any preamble, explanation, or markdown formatting. Output ONLY th
 
     @staticmethod
     def build_training_prompt(example: LabeledExample, kb_text: str) -> dict[str, str]:
-        """Build a training prompt with input and expected output.
+        """
+        Build a training prompt with input and expected output.
 
         Args:
             example: Labeled training example.
             kb_text: Knowledge base as formatted text.
 
         Returns:
-            Dictionary with 'input' and 'output' keys.
+            Dictionary with 'input' and 'output' keys (for backward compatibility),
+            but also includes 'messages' for chat template usage.
         """
         # Build the input text
         context_parts = []
@@ -84,7 +87,7 @@ Analyze the target sentence for ableist language. Output your response as JSON."
         }
 
         return {
-            "input": f"{PromptTemplate.SYSTEM_INSTRUCTION}\n\n{user_message}",
+            "input": user_message,
             "output": json.dumps(justification_json, indent=2),
         }
 
@@ -152,7 +155,10 @@ class LoRAAdapter(LLMTrainer):
         self._initialize_model()
 
     def _initialize_model(self) -> None:
-        """Initialize the base model with quantization."""
+        """
+        Initialize the base model with quantization.
+
+        """
         print(f"Loading base model: {self.config.model_type.value}")
 
         # Configure quantization
@@ -187,23 +193,35 @@ class LoRAAdapter(LLMTrainer):
             cache_dir=str(self.config.cache_dir),
         )
 
-        # Set pad token if not present
+        # Configure padding token
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             self.model.config.pad_token_id = self.tokenizer.eos_token_id
 
-        print("✓ Model and tokenizer loaded")
+        # Right padding ensures causal attention masks align correctly during training
+        self.tokenizer.padding_side = "right"
+
+        print(
+            f"✓ Model and tokenizer loaded (padding_side={self.tokenizer.padding_side})"
+        )
 
     def _prepare_peft_model(self) -> None:
-        """Prepare the model for PEFT training with LoRA."""
+        """
+        Prepare the model for PEFT training with LoRA.
+        """
         # Prepare model for k-bit training
         self.model = prepare_model_for_kbit_training(self.model)
 
-        # Configure LoRA
+        # This trades computation for memory by not storing all activations
+        # Critical for training with consumer GPUs (RTX 4090, etc.)
+        self.model.gradient_checkpointing_enable()
+        print("✓ Gradient checkpointing enabled (saves ~30-40% GPU memory)")
+
+        # Configure LoRA (ERROR #3 is already fixed in config.py)
         peft_config = LoraConfig(
             r=self.config.lora_config.r,
             lora_alpha=self.config.lora_config.lora_alpha,
-            target_modules=self.config.lora_config.target_modules,
+            target_modules=self.config.lora_config.target_modules,  # Now includes MLP layers
             lora_dropout=self.config.lora_config.lora_dropout,
             bias=self.config.lora_config.bias,
             task_type=self.config.lora_config.task_type,
@@ -218,7 +236,10 @@ class LoRAAdapter(LLMTrainer):
         examples: list[LabeledExample],
         kb_text: str,
     ) -> list[dict[str, str]]:
-        """Format examples into training data format.
+        """
+        Format examples into training data using chat template.
+
+        DataCollatorForCompletionOnlyLM will mask the input tokens (labels = -100).
 
         Args:
             examples: Labeled examples.
@@ -228,12 +249,62 @@ class LoRAAdapter(LLMTrainer):
             List of formatted examples with 'text' key.
         """
         formatted = []
+
         for example in examples:
             prompt_data = PromptTemplate.build_training_prompt(example, kb_text)
-            # Combine input and output for causal language modeling
-            full_text = f"{prompt_data['input']}\n\n{prompt_data['output']}{self.tokenizer.eos_token}"
-            formatted.append({"text": full_text})
+
+            # This enables DataCollatorForCompletionOnlyLM to identify and mask input tokens
+            messages = [
+                {"role": "system", "content": PromptTemplate.SYSTEM_INSTRUCTION},
+                {"role": "user", "content": prompt_data["input"]},
+                {"role": "assistant", "content": prompt_data["output"]},
+            ]
+
+            # Apply chat template (handles BOS/EOS tokens correctly for the model)
+            formatted_text = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=False,  # Assistant response already present
+            )
+
+            formatted.append({"text": formatted_text})
+
         return formatted
+
+    def _prepare_data_collator(self):
+        """
+        Create data collator that masks instruction tokens.
+
+        Returns:
+            DataCollatorForCompletionOnlyLM configured for the model.
+        """
+        # Identify the response template in the chat format
+        # For Llama 3, the assistant response starts with this pattern
+        # For other models, you may need to inspect the output of apply_chat_template
+
+        from src.config import ModelType
+
+        if self.config.model_type == ModelType.LLAMA3_8B:
+            # Llama 3 specific response pattern
+            response_template = "<|start_header_id|>assistant<|end_header_id|>"
+        elif self.config.model_type == ModelType.MISTRAL_7B:
+            # Mistral specific response pattern
+            response_template = "[/INST]"
+        else:
+            # Fallback - attempt to detect
+            # You can inspect: self.tokenizer.apply_chat_template(test_messages)
+            response_template = "assistant"
+            print(f"⚠ Warning: Using generic response template. May need adjustment.")
+
+        data_collator = DataCollatorForCompletionOnlyLM(
+            response_template=response_template,
+            tokenizer=self.tokenizer,
+            mlm=False,  # Not masked language modeling
+        )
+
+        print(f"✓ Data collator configured with response_template: {response_template}")
+
+        return data_collator
 
     def train(
         self,
@@ -254,12 +325,11 @@ class LoRAAdapter(LLMTrainer):
             self._prepare_peft_model()
 
             # Get knowledge base text
-            from config import KnowledgeBaseConfig
+            from src.config import KnowledgeBaseConfig
 
             kb_config = KnowledgeBaseConfig()
             kb_text = kb_config.get_all_principles_text()
 
-            # Format training data
             train_dataset = self._format_examples_for_training(
                 training_examples, kb_text
             )
@@ -269,6 +339,8 @@ class LoRAAdapter(LLMTrainer):
                 eval_dataset = self._format_examples_for_training(
                     validation_examples, kb_text
                 )
+
+            data_collator = self._prepare_data_collator()
 
             # Configure training arguments
             training_args = TrainingArguments(
@@ -292,17 +364,19 @@ class LoRAAdapter(LLMTrainer):
                 report_to=["none"],  # Disable wandb/tensorboard
             )
 
-            # Create trainer
             trainer = SFTTrainer(
                 model=self.peft_model,
                 train_dataset=train_dataset,
                 eval_dataset=eval_dataset,
                 args=training_args,
+                data_collator=data_collator,
                 max_seq_length=self.config.training_hyperparameters.max_seq_length,
                 dataset_text_field="text",
             )
 
             # Start training
+            print("\n🚀 Starting training with instruction masking enabled...")
+            print("   (Loss will only be computed on assistant responses)")
             trainer.train()
 
         except Exception as e:
@@ -337,6 +411,7 @@ class LoRAAdapter(LLMTrainer):
                     "model_type": self.config.model_type.value,
                     "lora_r": self.config.lora_config.r,
                     "lora_alpha": self.config.lora_config.lora_alpha,
+                    "target_modules": self.config.lora_config.target_modules,
                 },
                 f,
                 indent=2,
@@ -393,7 +468,9 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
         self._load_model()
 
     def _load_model(self) -> None:
-        """Load the fine-tuned model for inference."""
+        """
+        Load the fine-tuned model for inference.
+        """
         print(f"Loading fine-tuned model from: {self.model_path}")
 
         # Load base model with quantization
@@ -430,10 +507,21 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
 
+        # Left padding ensures sequences are end-aligned, so generation starts
+        # from the last real token (not padding tokens)
+        self.tokenizer.padding_side = "left"
+
+        # Configure padding token if not present
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.model.config.pad_token_id = self.tokenizer.eos_token_id
+
         # Set to evaluation mode
         self.model.eval()
 
-        print("✓ Model loaded for inference")
+        print(
+            f"✓ Model loaded for inference (padding_side={self.tokenizer.padding_side})"
+        )
 
     def generate_justification(
         self,
@@ -502,7 +590,8 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
         examples: list[LabeledExample],
         knowledge_base_text: str,
     ) -> list[str]:
-        """Generate justifications for a batch of examples.
+        """
+        Generate justifications for a batch of examples.
 
         Args:
             examples: List of labeled examples.

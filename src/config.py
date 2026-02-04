@@ -41,10 +41,23 @@ class LoRAConfig(BaseModel):
 
     r: int = Field(default=16, ge=1, le=128, description="LoRA rank")
     lora_alpha: int = Field(default=32, ge=1, description="LoRA alpha scaling")
+
+    # ✅ FIX ERROR #3: Target BOTH attention and MLP layers for full model capacity
     target_modules: list[str] = Field(
-        default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"],
-        description="Modules to apply LoRA",
+        default_factory=lambda: [
+            # Attention projections
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            # MLP/Feed-Forward layers (CRITICAL for reasoning and knowledge storage)
+            "gate_proj",  # Gating mechanism
+            "up_proj",  # Up-projection
+            "down_proj",  # Down-projection
+        ],
+        description="Modules to apply LoRA (attention + MLP for full capacity)",
     )
+
     lora_dropout: float = Field(default=0.05, ge=0.0, le=0.5)
     bias: Literal["none", "all", "lora_only"] = "none"
     task_type: Literal["CAUSAL_LM"] = "CAUSAL_LM"
