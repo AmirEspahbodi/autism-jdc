@@ -17,7 +17,7 @@ from transformers import (
     Trainer,
     TrainingArguments,
 )
-from trl import, SFTTrainer
+from trl import SFTTrainer
 
 from src.config import ModelType, SystemConfig
 from src.domain import (
