@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 class ModelType(str, Enum):
     """Supported base model types."""
 
-    LLAMA3_8B = "meta-llama/Llama-3.2-3B-Instruct"
+    LLAMA3_8B = "meta-llama/Meta-Llama-3-8B-Instruct"
     MISTRAL_7B = "mistralai/Mistral-7B-Instruct-v0.2"
 
 
