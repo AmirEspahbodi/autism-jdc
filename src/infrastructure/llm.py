@@ -144,45 +144,105 @@ class LoRAAdapter(LLMTrainer):
         self.peft_model = get_peft_model(self.model, peft_config)
         self.peft_model.print_trainable_parameters()
 
-    def _format_examples_for_training(
-        self,
-        examples: list[LabeledExample],
-    ) -> Dataset:
-        """
-        Refactored to handle SFT pre-formatted data correctly without double-templating.
-        """
+    def _format_examples_for_training(self, examples: list[LabeledExample]) -> Dataset:
+        # (Same logic as before, ensuring text field is created)
         data_list = []
-
         for example in examples:
-            # Check for Pre-formatted SFT data (Fix: Loss Masking)
             if example.input_prompt is not None and example.model_output is not None:
-                # Apply chat template to SFT data to preserve structural markers for loss masking
                 messages = [
                     {"role": "user", "content": example.input_prompt},
                     {"role": "assistant", "content": example.model_output},
                 ]
-
-                # Generate properly structured text with role separators
-                full_text = self.tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=False,  # Don't add prompt suffix (we have the response)
-                )
-
-                data_list.append({"text": full_text})
-            else:
-                # Legacy / Structured Data Path
-                # Create list of messages [{"role": "user", ...}, {"role": "assistant", ...}]
-                messages = PromptTemplate.build_training_messages(example)
-
-                # Apply template to generate full training string
                 full_text = self.tokenizer.apply_chat_template(
                     messages, tokenize=False, add_generation_prompt=False
                 )
-
                 data_list.append({"text": full_text})
-
         return Dataset.from_list(data_list)
+
+    def _derive_response_template(self) -> str:
+        """
+        Dynamically derive the response template for loss masking.
+        Refactored from _prepare_data_collator to return the string template.
+        """
+        messages = [{"role": "user", "content": "DETECT_RESPONSE_TEMPLATE"}]
+        prompt_no_gen = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=False
+        )
+        prompt_with_gen = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
+        response_template = ""
+        if prompt_with_gen.startswith(prompt_no_gen):
+            response_template = prompt_with_gen[len(prompt_no_gen) :]
+
+        if not response_template.strip():
+            if (
+                self.config.model_type == ModelType.LLAMA3_8B
+                or "llama-3" in self.config.model_type.value.lower()
+            ):
+                response_template = "<|start_header_id|>assistant<|end_header_id|>"
+            elif "[/INST]" in prompt_no_gen:
+                response_template = "[/INST]"
+            else:
+                response_template = "### Response:\n"
+
+        return response_template
+
+    def train(
+        self,
+        training_examples: list[LabeledExample],
+        validation_examples: Optional[list[LabeledExample]] = None,
+    ) -> None:
+        try:
+            self._prepare_peft_model()
+            train_dataset = self._format_examples_for_training(training_examples)
+            eval_dataset = None
+            if validation_examples:
+                eval_dataset = self._format_examples_for_training(validation_examples)
+
+            # Derive the template string instead of creating a collator object
+            response_template = self._derive_response_template()
+
+            # Use SFTConfig instead of TrainingArguments
+            # completion_only_loss=True enables the internal DataCollatorForCompletionOnlyLM
+            training_args = SFTConfig(
+                output_dir=str(self.config.output_dir / "checkpoints"),
+                num_train_epochs=self.config.training_hyperparameters.num_epochs,
+                per_device_train_batch_size=self.config.training_hyperparameters.batch_size,
+                gradient_accumulation_steps=self.config.training_hyperparameters.gradient_accumulation_steps,
+                learning_rate=self.config.training_hyperparameters.learning_rate,
+                fp16=self.config.training_hyperparameters.fp16,
+                logging_steps=self.config.training_hyperparameters.logging_steps,
+                save_steps=self.config.training_hyperparameters.save_steps,
+                eval_strategy="steps" if eval_dataset else "no",
+                save_strategy="steps",
+                warmup_ratio=self.config.training_hyperparameters.warmup_ratio,
+                optim=self.config.training_hyperparameters.optim,
+                save_total_limit=3,
+                report_to="none",
+                remove_unused_columns=False,
+                dataset_text_field="text",
+                max_seq_length=self.config.training_hyperparameters.max_seq_length,
+                # NEW Completion Logic:
+                completion_only_loss=True,
+                response_template=response_template,
+            )
+
+            trainer = SFTTrainer(
+                model=self.peft_model,
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+                args=training_args,
+                # Note: SFTTrainer handles the collator internally when
+                # completion_only_loss and response_template are in args.
+                tokenizer=self.tokenizer,
+            )
+
+            trainer.train()
+
+        except Exception as e:
+            raise TrainingError(f"Training failed: {str(e)}") from e
 
     def _prepare_data_collator(self):
         """
@@ -252,56 +312,6 @@ class LoRAAdapter(LLMTrainer):
         )
 
         return data_collator
-
-    def train(
-        self,
-        training_examples: list[LabeledExample],
-        validation_examples: Optional[list[LabeledExample]] = None,
-    ) -> None:
-        try:
-            self._prepare_peft_model()
-
-            train_dataset = self._format_examples_for_training(training_examples)
-
-            eval_dataset = None
-            if validation_examples:
-                eval_dataset = self._format_examples_for_training(validation_examples)
-
-            data_collator = self._prepare_data_collator()
-
-            training_args = TrainingArguments(
-                output_dir=str(self.config.output_dir / "checkpoints"),
-                num_train_epochs=self.config.training_hyperparameters.num_epochs,
-                per_device_train_batch_size=self.config.training_hyperparameters.batch_size,
-                gradient_accumulation_steps=self.config.training_hyperparameters.gradient_accumulation_steps,
-                learning_rate=self.config.training_hyperparameters.learning_rate,
-                fp16=self.config.training_hyperparameters.fp16,
-                logging_steps=self.config.training_hyperparameters.logging_steps,
-                save_steps=self.config.training_hyperparameters.save_steps,
-                evaluation_strategy="steps" if eval_dataset else "no",
-                save_strategy="steps",
-                warmup_ratio=self.config.training_hyperparameters.warmup_ratio,
-                optim=self.config.training_hyperparameters.optim,
-                save_total_limit=3,
-                report_to=["none"],
-                remove_unused_columns=False,
-            )
-
-            trainer = SFTTrainer(
-                model=self.peft_model,
-                train_dataset=train_dataset,
-                eval_dataset=eval_dataset,
-                dataset_text_field="text",
-                args=training_args,
-                data_collator=data_collator,
-                max_seq_length=self.config.training_hyperparameters.max_seq_length,
-                tokenizer=self.tokenizer,
-            )
-
-            trainer.train()
-
-        except Exception as e:
-            raise TrainingError(f"Training failed: {str(e)}") from e
 
     def save_model(self, output_path: str) -> None:
         if self.peft_model is None:
