@@ -312,7 +312,7 @@ Examples:
     )
     args = parser.parse_args()
 
-    if hf_token:
+    if args.hf_token:
         print("✓ Authenticating with Hugging Face...")
         login(token=args.hf_token)
     else:
