@@ -114,6 +114,7 @@ class LoRAAdapter(LLMTrainer):
             self.config.model_type.value,
             trust_remote_code=True,
             cache_dir=str(self.config.cache_dir),
+            token=self.config.hf_token,
         )
 
         # 1. We DO NOT resize embeddings on quantized models. It corrupts weights.
@@ -126,6 +127,24 @@ class LoRAAdapter(LLMTrainer):
         # 4. Disable manual BOS addition; let apply_chat_template handle it
         if hasattr(self.tokenizer, "add_bos_token"):
             self.tokenizer.add_bos_token = False
+
+            # Update: Added token=self.config.hf_token
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.config.model_type.value,
+                quantization_config=bnb_config,
+                device_map="auto",
+                trust_remote_code=True,
+                cache_dir=str(self.config.cache_dir),
+                token=self.config.hf_token,
+            )
+
+            # Update: Added token=self.config.hf_token
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.config.model_type.value,
+                trust_remote_code=True,
+                cache_dir=str(self.config.cache_dir),
+                token=self.config.hf_token,
+            )
 
     def _prepare_peft_model(self) -> None:
         self.model = prepare_model_for_kbit_training(self.model)
@@ -365,6 +384,7 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                 self.config.model_type.value,
                 trust_remote_code=True,
                 cache_dir=str(self.config.cache_dir),
+                token=self.config.hf_token,
             )
 
             # 2. Tokenizer Hygiene (Matching Training)

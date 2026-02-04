@@ -149,6 +149,10 @@ class SystemConfig(BaseModel):
         seed: Random seed for reproducibility.
     """
 
+    hf_token: Optional[str] = Field(
+        default=None,
+        description="Hugging Face API token for accessing gated repositories like Llama 3.",
+    )
     model_type: ModelType = ModelType.LLAMA3_8B
     lora_config: LoRAConfig = Field(default_factory=LoRAConfig)
     quantization_config: QuantizationConfig = Field(default_factory=QuantizationConfig)

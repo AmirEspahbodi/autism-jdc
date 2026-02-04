@@ -303,7 +303,12 @@ Examples:
         default=2e-4,
         help="Learning rate (default: 2e-4)",
     )
-
+    parser.add_argument(
+        "--hf-token",
+        type=str,
+        default=None,
+        help="Hugging Face API token (can also be set via HF_TOKEN env var)",
+    )
     args = parser.parse_args()
 
     # Create configuration
