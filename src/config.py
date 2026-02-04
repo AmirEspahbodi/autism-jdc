@@ -158,7 +158,7 @@ class SystemConfig(BaseModel):
     inference_config: InferenceConfig = Field(default_factory=InferenceConfig)
 
     output_dir: Path = Field(default=Path("./outputs"))
-    data_dir: Path = Field(default=Path("./data"))
+    data_dir: Path = Field(default=Path("./dataset"))
     cache_dir: Path = Field(default=Path("./cache"))
     seed: int = Field(default=42, ge=0)
 

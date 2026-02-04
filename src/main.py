@@ -257,7 +257,7 @@ Examples:
     parser.add_argument(
         "--data-dir",
         type=str,
-        default="./data",
+        default="./dataset",
         help="Directory containing dataset.json, train.json, or test.json (default: ./data)",
     )
 
