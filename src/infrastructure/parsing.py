@@ -201,8 +201,6 @@ class RobustJSONParser(JustificationParser):
 
         Uses heuristics to extract fields even if JSON is invalid.
 
-        ✅ FIX ERROR #5: Normalizes principle_id to uppercase.
-
         Args:
             raw_output: Raw output that failed JSON parsing.
 
@@ -220,7 +218,6 @@ class RobustJSONParser(JustificationParser):
         if not principle_match:
             raise ParsingError("Could not extract principle_id from output")
 
-        # ✅ FIX ERROR #5: Normalize to uppercase
         principle_id = principle_match.group(1).upper()
 
         # Extract justification_text
@@ -252,9 +249,6 @@ class RobustJSONParser(JustificationParser):
         """
         Validate that parsed JSON matches the expected schema.
 
-        ✅ FIX ERROR #5: Now with case-insensitive principle_id validation
-        and in-place normalization.
-
         Args:
             data: Parsed JSON data (modified in-place to normalize principle_id).
 
@@ -269,14 +263,12 @@ class RobustJSONParser(JustificationParser):
             if not isinstance(data[field], str):
                 return False
 
-        # ✅ FIX ERROR #5: Normalize and validate principle_id
         principle_id = data["principle_id"].strip().upper()
         valid_principles = {"P0", "P1", "P2", "P3", "P4"}
 
         if principle_id not in valid_principles:
             return False
 
-        # ✅ Update data dict with normalized value (modifies in-place)
         data["principle_id"] = principle_id
 
         # Validate optional evidence_quote field

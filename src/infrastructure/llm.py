@@ -97,7 +97,7 @@ Analyze the target sentence for ableist language. Output your response as JSON."
         kb_text: str,
         context_before: Optional[str] = None,
         context_after: Optional[str] = None,
-    ) -> str:
+    ) -> list[dict[str, str]]:
         """Build an inference prompt (input only).
 
         Args:
@@ -107,7 +107,7 @@ Analyze the target sentence for ableist language. Output your response as JSON."
             context_after: Optional following context.
 
         Returns:
-            Formatted prompt string.
+            List of message dicts with 'role' and 'content' keys for chat template.
         """
         context_parts = []
         if context_before:
@@ -124,7 +124,10 @@ Analyze the target sentence for ableist language. Output your response as JSON."
 
 Analyze the target sentence for ableist language. Output your response as JSON."""
 
-        return f"{PromptTemplate.SYSTEM_INSTRUCTION}\n\n{user_message}"
+        return [
+            {"role": "system", "content": PromptTemplate.SYSTEM_INSTRUCTION},
+            {"role": "user", "content": user_message},
+        ]
 
 
 class LoRAAdapter(LLMTrainer):
@@ -157,7 +160,6 @@ class LoRAAdapter(LLMTrainer):
     def _initialize_model(self) -> None:
         """
         Initialize the base model with quantization.
-
         """
         print(f"Loading base model: {self.config.model_type.value}")
 
@@ -217,11 +219,24 @@ class LoRAAdapter(LLMTrainer):
         self.model.gradient_checkpointing_enable()
         print("✓ Gradient checkpointing enabled (saves ~30-40% GPU memory)")
 
-        # Configure LoRA (ERROR #3 is already fixed in config.py)
+        if hasattr(self.model, "enable_input_require_grads"):
+            self.model.enable_input_require_grads()
+            print("✓ Input gradients enabled for quantized model")
+        else:
+            # Fallback for older transformers versions (< 4.35.0)
+            def make_inputs_require_grad(module, input, output):
+                output.requires_grad_(True)
+
+            self.model.get_input_embeddings().register_forward_hook(
+                make_inputs_require_grad
+            )
+            print("✓ Input gradients enabled via forward hook (legacy method)")
+
+        # Configure LoRA
         peft_config = LoraConfig(
             r=self.config.lora_config.r,
             lora_alpha=self.config.lora_config.lora_alpha,
-            target_modules=self.config.lora_config.target_modules,  # Now includes MLP layers
+            target_modules=self.config.lora_config.target_modules,  # Includes MLP layers
             lora_dropout=self.config.lora_config.lora_dropout,
             bias=self.config.lora_config.bias,
             task_type=self.config.lora_config.task_type,
@@ -260,7 +275,6 @@ class LoRAAdapter(LLMTrainer):
                 {"role": "assistant", "content": prompt_data["output"]},
             ]
 
-            # Apply chat template (handles BOS/EOS tokens correctly for the model)
             formatted_text = self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
@@ -375,7 +389,7 @@ class LoRAAdapter(LLMTrainer):
             )
 
             # Start training
-            print("\n🚀 Starting training with instruction masking enabled...")
+            print("\n Starting training with instruction masking enabled...")
             print("   (Loss will only be computed on assistant responses)")
             trainer.train()
 
@@ -545,15 +559,22 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
             InferenceError: If generation fails.
         """
         try:
-            # Build prompt
-            prompt = PromptTemplate.build_inference_prompt(
+            messages = PromptTemplate.build_inference_prompt(
                 sentence=sentence,
                 kb_text=knowledge_base_text,
                 context_before=context_before,
                 context_after=context_after,
             )
 
-            # Tokenize
+            # This adds the <|start_header_id|>assistant<|end_header_id|> cue
+            # that the model was trained to recognize
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,  # Get string first
+                add_generation_prompt=True,  # Add assistant prompt - CRITICAL!
+            )
+
+            # Tokenize the chat-formatted prompt
             inputs = self.tokenizer(
                 prompt,
                 return_tensors="pt",
@@ -591,7 +612,7 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
 
         Args:
             examples: List of labeled examples.
-            knowledge_base_text: Knowledge base as text.
+            kb_text: Knowledge base as text.
 
         Returns:
             List of raw outputs.
@@ -599,45 +620,57 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
         Raises:
             InferenceError: If generation fails.
         """
+        try:
+            prompts = []
+            for ex in examples:
+                messages = PromptTemplate.build_inference_prompt(
+                    sentence=ex.sentence,
+                    kb_text=kb_text,
+                    context_before=ex.context_before,
+                    context_after=ex.context_after,
+                )
 
-        # Build all prompts
-        prompts = [
-            PromptTemplate.build_inference_prompt(
-                sentence=ex.sentence,
-                kb_text=kb_text,
-                context_before=ex.context_before,
-                context_after=ex.context_after,
-            )
-            for ex in examples
-        ]
+                # Apply chat template with generation prompt
+                prompt = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                prompts.append(prompt)
 
-        # Tokenize batch with left padding (already set in _load_model)
-        inputs = self.tokenizer(
-            prompts,
-            return_tensors="pt",
-            padding=True,  # ← Pad to longest in batch
-            truncation=True,
-            max_length=self.config.training_hyperparameters.max_seq_length,
-        ).to(self.model.device)
+            # Tokenize batch with left padding (already set in _load_model)
+            inputs = self.tokenizer(
+                prompts,
+                return_tensors="pt",
+                padding=True,  # Pad to longest in batch
+                truncation=True,
+                max_length=self.config.training_hyperparameters.max_seq_length,
+            ).to(self.model.device)
 
-        # Batch generation
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=self.config.inference_config.max_new_tokens,
-                temperature=self.config.inference_config.temperature,
-                # ... other params
-                pad_token_id=self.tokenizer.pad_token_id,
-            )
+            # Batch generation
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=self.config.inference_config.max_new_tokens,
+                    temperature=self.config.inference_config.temperature,
+                    top_p=self.config.inference_config.top_p,
+                    top_k=self.config.inference_config.top_k,
+                    do_sample=self.config.inference_config.do_sample,
+                    repetition_penalty=self.config.inference_config.repetition_penalty,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
 
-        # Decode outputs (skip input tokens for each example)
-        results = []
-        for i, output in enumerate(outputs):
-            input_length = inputs.input_ids[i].shape[0]
-            generated = self.tokenizer.decode(
-                output[input_length:],
-                skip_special_tokens=True,
-            )
-            results.append(generated.strip())
+            # Decode outputs (skip input tokens for each example)
+            results = []
+            for i, output in enumerate(outputs):
+                input_length = inputs.input_ids[i].shape[0]
+                generated = self.tokenizer.decode(
+                    output[input_length:],
+                    skip_special_tokens=True,
+                )
+                results.append(generated.strip())
 
-        return results
+            return results
+
+        except Exception as e:
+            raise InferenceError(f"Batch generation failed: {str(e)}") from e
