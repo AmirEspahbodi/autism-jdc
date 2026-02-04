@@ -1,9 +1,10 @@
 """
 Infrastructure data loader module - Data loading implementations.
-Refactored to include PreformattedDataLoader.
+Refactored to include PreformattedDataLoader with proper validation splitting.
 """
 
 import json
+import random
 from pathlib import Path
 from typing import Optional
 
@@ -15,26 +16,39 @@ class PreformattedDataLoader(DataLoader):
 
     Reads from JSON files where inputs are already fully formatted.
     Supports both training (dataset.json) and testing (test_dataset.json) splits.
+    Now implements deterministic validation splitting to ensure scientific integrity.
     """
 
     def __init__(
         self,
         train_path: Path = Path("./dataset/dataset.json"),
         test_path: Path = Path("./dataset/test_dataset.json"),
+        val_path: Path = Path("./dataset/val_dataset.json"),
+        val_split_ratio: float = 0.1,
+        seed: int = 42,
     ) -> None:
         """
         Args:
             train_path: Path to the training dataset file.
             test_path: Path to the test dataset file.
+            val_path: Path to an explicit validation dataset file.
+            val_split_ratio: Ratio of training data to use for validation if val_path is missing.
+            seed: Random seed for deterministic splitting.
         """
         self.train_path = train_path
         self.test_path = test_path
+        self.val_path = val_path
+        self.val_split_ratio = val_split_ratio
+        self.seed = seed
+
+        # Cache to store the split to ensure consistency between load_training and load_validation
+        self._train_cache: Optional[list[LabeledExample]] = None
+        self._val_cache: Optional[list[LabeledExample]] = None
 
     def _load_data_from_json(self, path: Path) -> list[LabeledExample]:
         """Helper to load and validate SFT data from a JSON file."""
         if not path.exists():
             # Gracefully handle missing files by returning empty list
-            # This allows the pipeline to continue or fall back if needed
             return []
 
         try:
@@ -67,26 +81,63 @@ class PreformattedDataLoader(DataLoader):
         except Exception as e:
             raise DataLoadError(f"Failed to load dataset from {path}: {e}")
 
-    def load_training_data(self) -> list[LabeledExample]:
-        """Load pre-formatted training data."""
-        if not self.train_path.exists():
-            raise DataLoadError(
-                f"Training dataset file not found at: {self.train_path}"
-            )
+    def _prepare_train_val_split(self) -> None:
+        """
+        Prepares training and validation data.
+        If explicit validation file exists, uses it.
+        Otherwise, performs a deterministic split of the training file.
+        """
+        if self._train_cache is not None:
+            return  # Already loaded
 
-        return self._load_data_from_json(self.train_path)
+        # Priority A: Check for explicit validation file
+        if self.val_path.exists():
+            print(f"✓ Loading explicit validation file: {self.val_path}")
+            self._train_cache = self._load_data_from_json(self.train_path)
+            self._val_cache = self._load_data_from_json(self.val_path)
+            return
+
+        # Priority B: Deterministic Split from Training Data
+        print(f"ℹ No validation file found at {self.val_path}")
+        print(
+            f"  Performing deterministic split (Ratio: {self.val_split_ratio}, Seed: {self.seed})..."
+        )
+
+        full_data = self._load_data_from_json(self.train_path)
+        if not full_data:
+            self._train_cache = []
+            self._val_cache = []
+            return
+
+        # Deterministic shuffle
+        rng = random.Random(self.seed)
+        rng.shuffle(full_data)
+
+        # Calculate split index
+        split_idx = int(len(full_data) * (1 - self.val_split_ratio))
+
+        # Slice data
+        self._train_cache = full_data[:split_idx]
+        self._val_cache = full_data[split_idx:]
+
+        print(
+            f"✓ Split created: {len(self._train_cache)} Training, {len(self._val_cache)} Validation examples"
+        )
+
+    def load_training_data(self) -> list[LabeledExample]:
+        """Load pre-formatted training data (minus validation split)."""
+        self._prepare_train_val_split()
+        return self._train_cache if self._train_cache else []
 
     def load_validation_data(self) -> list[LabeledExample]:
         """Load validation data."""
-        # Future: could allow a separate val_path in __init__
-        return []
+        self._prepare_train_val_split()
+        return self._val_cache if self._val_cache else []
 
     def load_test_data(self) -> list[LabeledExample]:
         """Load pre-formatted test data."""
         data = self._load_data_from_json(self.test_path)
         if not data:
-            # Optional: Log warning here if strictly expected,
-            # but returning empty list adheres to contract.
             pass
         return data
 

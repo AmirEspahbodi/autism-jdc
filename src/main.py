@@ -25,25 +25,7 @@ from src.infrastructure import (
 )
 
 # Importing directly from module to ensure access to PreformattedDataLoader
-from src.infrastructure.data_loader import (
-    FileBasedDataLoader,
-    PreformattedDataLoader,
-)
-
-
-def print_banner() -> None:
-    """Print the system banner."""
-    banner = """
-╔══════════════════════════════════════════════════════════════════════╗
-║                                                                      ║
-║   Neuro-Symbolic Justification-Driven Classification (JDC) System   ║
-║                                                                      ║
-║   A Clean Architecture Implementation for Fine-Tuning LLMs          ║
-║   with LoRA on Neurodiversity-Aware Language Classification         ║
-║                                                                      ║
-╚══════════════════════════════════════════════════════════════════════╝
-    """
-    print(banner)
+from src.infrastructure.data_loader import PreformattedDataLoader
 
 
 def check_gpu() -> None:
@@ -61,44 +43,32 @@ def check_gpu() -> None:
 
 def get_training_data_loader(config: SystemConfig):
     """Factory to select the appropriate training data loader."""
-    # Priority 1: SFT Pre-formatted dataset (dataset.json)
+    # Strict Policy: Only SFT Pre-formatted dataset (dataset.json) is allowed.
+    # Unsafe fallbacks to legacy loaders have been removed to prevent runtime instability.
     sft_path = config.data_dir / "dataset.json"
-    if sft_path.exists():
-        print(f"✓ Found SFT dataset at: {sft_path}")
-        # Updated to use specific 'train_path' argument
-        return PreformattedDataLoader(train_path=sft_path)
 
-    # Priority 2: Legacy structured dataset (train.json)
-    legacy_path = config.data_dir / "train.json"
-    if legacy_path.exists():
-        print(f"✓ Found structured dataset at: {legacy_path}")
-        return FileBasedDataLoader(data_dir=config.data_dir)
+    if not sft_path.exists():
+        print(f"✗ Critical: dataset.json not found at {sft_path}")
+        print("  The system strictly requires the SFT dataset. Aborting.")
+        sys.exit(1)
 
-    # Fallback: Mock data
-    print("⚠ No real dataset found (checked dataset.json/train.json).")
-    sys.exit(1)
+    print(f"✓ Found SFT dataset at: {sft_path}")
+    return PreformattedDataLoader(train_path=sft_path)
 
 
 def get_evaluation_data_loader(config: SystemConfig):
     """Factory to select the appropriate evaluation data loader."""
-    # Priority 1: SFT Pre-formatted test dataset (test_dataset.json)
-    # Checks for the standard SFT test file naming convention
+    # Strict Policy: Only SFT Pre-formatted test dataset (test_dataset.json) is allowed.
     sft_test_path = config.data_dir / "test_dataset.json"
-    if sft_test_path.exists():
-        print(f"✓ Found SFT test dataset at: {sft_test_path}")
-        # We inject the found path as 'test_path'.
-        # 'train_path' can default since it's unused in evaluation.
-        return PreformattedDataLoader(test_path=sft_test_path)
 
-    # Priority 2: Structured test set (test.json) for metrics
-    test_path = config.data_dir / "test.json"
-    if test_path.exists():
-        print(f"✓ Found test dataset at: {test_path}")
-        return FileBasedDataLoader(data_dir=config.data_dir)
+    if not sft_test_path.exists():
+        print(f"✗ Critical: test_dataset.json not found at {sft_test_path}")
+        print("  The system strictly requires the SFT test dataset. Aborting.")
+        sys.exit(1)
 
-    # Fallback: Mock data
-    print("⚠ No test_dataset.json or test.json found.")
-    sys.exit(1)
+    print(f"✓ Found SFT test dataset at: {sft_test_path}")
+    # We inject the found path as 'test_path'.
+    return PreformattedDataLoader(test_path=sft_test_path)
 
 
 def run_fine_tuning(config: SystemConfig) -> None:
@@ -134,8 +104,7 @@ def run_fine_tuning(config: SystemConfig) -> None:
 
     # Execute
     try:
-        # Note: Validation requires separate logic depending on the loader,
-        # here we assume the loader handles split or returns empty if not available.
+        # Note: Validation is now safely handled by the loader internally
         fine_tune_use_case.execute(use_validation=True)
         print("\n✓ Fine-tuning completed successfully!")
         return True
@@ -217,7 +186,6 @@ def run_full_pipeline(config: SystemConfig) -> None:
     Args:
         config: System configuration.
     """
-    print_banner()
     check_gpu()
 
     # Stage 3: Fine-tuning
