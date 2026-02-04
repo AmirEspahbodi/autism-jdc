@@ -43,7 +43,6 @@ class LoRAConfig(BaseModel):
     r: int = Field(default=16, ge=1, le=128, description="LoRA rank")
     lora_alpha: int = Field(default=32, ge=1, description="LoRA alpha scaling")
 
-    # ✅ FIX ERROR #3: Target BOTH attention and MLP layers for full model capacity
     target_modules: list[str] = Field(
         default_factory=lambda: [
             # Attention projections
@@ -59,7 +58,6 @@ class LoRAConfig(BaseModel):
         description="Modules to apply LoRA (attention + MLP for full capacity)",
     )
 
-    # ✅ FIX 1: Ensure Embeddings are Saved to prevent corruption of new tokens
     modules_to_save: list[str] = Field(
         default_factory=lambda: ["embed_tokens", "lm_head"],
         description="Modules to save (embeddings) to handle added tokens like [PAD]",

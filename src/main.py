@@ -90,7 +90,6 @@ def run_fine_tuning(config: SystemConfig) -> None:
     # Infrastructure Layer: Concrete implementations
     trainer = LoRAAdapter(config)
 
-    # [FIX] Use Factory for Real Data
     data_loader = get_training_data_loader(config)
 
     print(f"✓ Adapters initialized (Loader: {data_loader.__class__.__name__})")
@@ -143,7 +142,6 @@ def run_evaluation(config: SystemConfig) -> None:
     console_reporter = ConsoleReportGenerator()
     kb_config = KnowledgeBaseConfig()
 
-    # [FIX] Use Factory for Real Data
     data_loader = get_evaluation_data_loader(config)
 
     print(f"✓ Adapters initialized (Loader: {data_loader.__class__.__name__})")

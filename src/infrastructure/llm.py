@@ -1,8 +1,3 @@
-"""
-Infrastructure LLM module - Concrete implementations for LLM training and inference.
-Refactored to fix SFT masking alignment, Llama 3 templating, and quantization safety.
-"""
-
 import json
 from pathlib import Path
 from typing import Any, Optional
@@ -121,9 +116,6 @@ class LoRAAdapter(LLMTrainer):
             cache_dir=str(self.config.cache_dir),
         )
 
-        # ---------------------------------------------------------------------
-        # FIX 1 & 2: Quantization Safety & Tokenizer Setup
-        # ---------------------------------------------------------------------
         # 1. We DO NOT resize embeddings on quantized models. It corrupts weights.
         # 2. We reuse the EOS token as PAD. This is standard for Llama/Mistral.
         self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -206,7 +198,16 @@ class LoRAAdapter(LLMTrainer):
             print(
                 "⚠ Warning: Could not dynamically derive response template via suffix diff."
             )
-            if "[/INST]" in prompt_no_gen:
+
+            # Explicit Model Type Checks for Known Architectures
+            if (
+                self.config.model_type == ModelType.LLAMA3_8B
+                or "llama-3" in self.config.model_type.value.lower()
+            ):
+                # Llama 3 specific header token.
+                # CRITICAL: Do NOT add newline here; Llama 3 uses special tokens.
+                response_template = "<|start_header_id|>assistant<|end_header_id|>"
+            elif "[/INST]" in prompt_no_gen:
                 # Mistral / Llama 2 style where the closing tag IS the separator
                 response_template = "[/INST]"
             else:
@@ -394,7 +395,6 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                 pad_token_id=self.tokenizer.pad_token_id,
             )
 
-        # FIX 3: Output Slicing
         # Slice the output to exclude the input prompt
         generated_tokens = outputs[0][input_len:]
 
@@ -462,7 +462,6 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
 
             decoded_batch = []
             for j, output_seq in enumerate(outputs):
-                # FIX 3: Batch Slicing
                 # Extract only the generated tokens
                 generated_tokens = output_seq[input_width:]
                 text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)

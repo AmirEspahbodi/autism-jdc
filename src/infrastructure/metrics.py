@@ -24,9 +24,6 @@ class StandardMetricsRepository(MetricsRepository):
 
     This adapter computes binary classification metrics.
 
-    # FIX: SCIENTIFIC INTEGRITY
-    Parsing failures are treated as incorrect predictions (System Failures),
-    not filtered out. This prevents metric inflation where a model with
     90% crash rate could report 100% accuracy on the few successes.
     """
 
