@@ -16,7 +16,7 @@ class ModelType(str, Enum):
     """Supported base model types."""
 
     LLAMA3_8B = "meta-llama/Meta-Llama-3-8B-Instruct"
-    MISTRAL_7B = "mistralai/Mistral-7B-Instruct-v0.2"
+    MISTRAL_7B = "mistralai/Mistral-7B-Instruct-v0.3"
 
 
 class QuantizationType(str, Enum):
