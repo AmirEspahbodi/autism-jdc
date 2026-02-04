@@ -77,6 +77,8 @@ def run_fine_tuning(config: SystemConfig) -> None:
     Args:
         config: System configuration.
     """
+    import gc  # Required for memory cleanup
+
     print("\n" + "=" * 70)
     print("INITIALIZING FINE-TUNING PIPELINE")
     print("=" * 70)
@@ -101,17 +103,36 @@ def run_fine_tuning(config: SystemConfig) -> None:
         config=config,
     )
 
+    result = False
+
     # Execute
     try:
         # Note: Validation is now safely handled by the loader internally
         fine_tune_use_case.execute(use_validation=True)
         print("\n✓ Fine-tuning completed successfully!")
-        return True
+        result = True
     except Exception as e:
         print(f"\n✗ Fine-tuning failed: {str(e)}")
         # import traceback
         # traceback.print_exc()
-        return False
+        result = False
+
+    # --- MANDATORY GPU CLEANUP BLOCK ---
+    print("\n[Cleanup] Releasing GPU resources to prevent OOM in next stage...")
+
+    # 1. Break references to the model
+    del fine_tune_use_case
+    del trainer
+
+    # 2. Force Python garbage collection
+    gc.collect()
+
+    # 3. Empty CUDA cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print("✓ GPU memory cache cleared.")
+
+    return result
 
 
 def run_evaluation(config: SystemConfig) -> None:

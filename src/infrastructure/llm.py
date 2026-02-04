@@ -149,21 +149,30 @@ class LoRAAdapter(LLMTrainer):
         examples: list[LabeledExample],
     ) -> Dataset:
         """
-        Refactored to use tokenizer.apply_chat_template.
-        This handles Llama 3 header IDs (<|start_header_id|>) and EOS/BOS automatically.
+        Refactored to handle SFT pre-formatted data correctly without double-templating.
         """
         data_list = []
 
         for example in examples:
-            # Create list of messages [{"role": "user", ...}, {"role": "assistant", ...}]
-            messages = PromptTemplate.build_training_messages(example)
+            # Check for Pre-formatted SFT data (Fix: Logic/Corruption)
+            if example.input_prompt is not None and example.model_output is not None:
+                # BYPASS apply_chat_template. Concatenate directly.
+                # Since the prompt is pre-formatted, we just need to join input + output.
+                # CRITICAL: Append EOS token so the model knows when to stop generating.
+                eos_token = self.tokenizer.eos_token if self.tokenizer.eos_token else ""
+                full_text = f"{example.input_prompt}{example.model_output}{eos_token}"
+                data_list.append({"text": full_text})
+            else:
+                # Legacy / Structured Data Path
+                # Create list of messages [{"role": "user", ...}, {"role": "assistant", ...}]
+                messages = PromptTemplate.build_training_messages(example)
 
-            # Apply template to generate full training string
-            full_text = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=False
-            )
+                # Apply template to generate full training string
+                full_text = self.tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=False
+                )
 
-            data_list.append({"text": full_text})
+                data_list.append({"text": full_text})
 
         return Dataset.from_list(data_list)
 
