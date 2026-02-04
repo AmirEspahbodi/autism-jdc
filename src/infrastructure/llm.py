@@ -149,6 +149,7 @@ class LoRAAdapter(LLMTrainer):
             lora_dropout=self.config.lora_config.lora_dropout,
             bias=self.config.lora_config.bias,
             task_type=self.config.lora_config.task_type,
+            modules_to_save=self.config.lora_config.modules_to_save,
         )
 
         self.peft_model = get_peft_model(self.model, peft_config)
@@ -322,6 +323,25 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
             bnb_config = None
 
         try:
+            # 1. Load Tokenizer FIRST
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.config.model_type.value,
+                trust_remote_code=True,
+                cache_dir=str(self.config.cache_dir),
+            )
+
+            # 2. Replicate Tokenizer Modifications from LoRAAdapter
+            if self.tokenizer.pad_token is None:
+                print("Adding distinct [PAD] token to tokenizer (matching training)...")
+                self.tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+
+            if hasattr(self.tokenizer, "add_bos_token"):
+                self.tokenizer.add_bos_token = False
+
+            # Configure for inference (left padding is standard for generation)
+            self.tokenizer.padding_side = "left"
+
+            # 3. Load Base Model
             base_model = AutoModelForCausalLM.from_pretrained(
                 self.config.model_type.value,
                 quantization_config=bnb_config,
@@ -330,23 +350,18 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                 cache_dir=str(self.config.cache_dir),
             )
 
-            # Load LoRA Adapter
+            # This ensures the base model has the same vocabulary size as expected by the LoRA adapter.
+            # Without this, loading the adapter throws a RuntimeError due to size mismatch.
+            print(f"Resizing model embeddings to {len(self.tokenizer)}...")
+            base_model.resize_token_embeddings(len(self.tokenizer))
+
+            # 5. Load LoRA Adapter
             print(f"Loading LoRA adapter from: {self.model_path}")
             self.model = PeftModel.from_pretrained(base_model, self.model_path)
 
-            # Load Tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.config.model_type.value,
-                trust_remote_code=True,
-                cache_dir=str(self.config.cache_dir),
-            )
-
-            # Configure tokenizer for generation (left padding is crucial for batch generation)
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-                self.model.config.pad_token_id = self.tokenizer.eos_token_id
-
-            self.tokenizer.padding_side = "left"
+            # Ensure pad_token_id is synced
+            if self.tokenizer.pad_token_id is not None:
+                self.model.config.pad_token_id = self.tokenizer.pad_token_id
 
         except Exception as e:
             raise InferenceError(f"Failed to load model: {str(e)}") from e

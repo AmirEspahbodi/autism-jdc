@@ -37,6 +37,7 @@ class LoRAConfig(BaseModel):
         lora_dropout: Dropout probability for LoRA layers.
         bias: How to handle bias terms.
         task_type: Type of task (causal language modeling for text generation).
+        modules_to_save: Modules to fully fine-tune and save (embeddings).
     """
 
     r: int = Field(default=16, ge=1, le=128, description="LoRA rank")
@@ -56,6 +57,12 @@ class LoRAConfig(BaseModel):
             "down_proj",  # Down-projection
         ],
         description="Modules to apply LoRA (attention + MLP for full capacity)",
+    )
+
+    # ✅ FIX 1: Ensure Embeddings are Saved to prevent corruption of new tokens
+    modules_to_save: list[str] = Field(
+        default_factory=lambda: ["embed_tokens", "lm_head"],
+        description="Modules to save (embeddings) to handle added tokens like [PAD]",
     )
 
     lora_dropout: float = Field(default=0.05, ge=0.0, le=0.5)
