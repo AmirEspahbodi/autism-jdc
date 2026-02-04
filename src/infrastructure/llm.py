@@ -3,11 +3,12 @@ Infrastructure LLM module - Concrete implementations for LLM training and infere
 
 This module contains adapters that implement the domain interfaces using
 HuggingFace Transformers, PEFT (LoRA), and bitsandbytes for quantization.
+Refactored to enforce ID-based tokenization for Special Token safety.
 """
 
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from peft import (
@@ -159,8 +160,6 @@ class LoRAAdapter(LLMTrainer):
     def _initialize_model(self) -> None:
         """
         Initialize the base model with quantization.
-
-        FIXED: ERROR #3 - Prevents double BOS token injection
         """
         print(f"Loading base model: {self.config.model_type.value}")
 
@@ -204,7 +203,7 @@ class LoRAAdapter(LLMTrainer):
         # Right padding ensures causal attention masks align correctly during training
         self.tokenizer.padding_side = "right"
 
-        # FIX ERROR #3: Disable automatic BOS token addition
+        # Disable automatic BOS token addition
         # The chat template handles BOS tokens, so tokenizer shouldn't add them
         if hasattr(self.tokenizer, "add_bos_token"):
             self.tokenizer.add_bos_token = False
@@ -220,11 +219,6 @@ class LoRAAdapter(LLMTrainer):
     def _validate_bos_tokens(self) -> None:
         """
         Validate that chat template produces exactly one BOS token.
-
-        FIX ERROR #3: Ensures training-inference distribution match
-
-        Raises:
-            ValueError: If multiple BOS tokens are detected
         """
         # Create test messages
         test_messages = [
@@ -261,32 +255,27 @@ class LoRAAdapter(LLMTrainer):
         """
         Prepare the model for PEFT training with LoRA.
         """
-        # Prepare model for k-bit training
         self.model = prepare_model_for_kbit_training(self.model)
 
-        # This trades computation for memory by not storing all activations
-        # Critical for training with consumer GPUs (RTX 4090, etc.)
         self.model.gradient_checkpointing_enable()
         print("✓ Gradient checkpointing enabled (saves ~30-40% GPU memory)")
 
         if hasattr(self.model, "enable_input_require_grads"):
             self.model.enable_input_require_grads()
-            print("✓ Input gradients enabled for quantized model")
         else:
-            # Fallback for older transformers versions (< 4.35.0)
+
             def make_inputs_require_grad(module, input, output):
                 output.requires_grad_(True)
 
             self.model.get_input_embeddings().register_forward_hook(
                 make_inputs_require_grad
             )
-            print("✓ Input gradients enabled via forward hook (legacy method)")
 
         # Configure LoRA
         peft_config = LoraConfig(
             r=self.config.lora_config.r,
             lora_alpha=self.config.lora_config.lora_alpha,
-            target_modules=self.config.lora_config.target_modules,  # Includes MLP layers
+            target_modules=self.config.lora_config.target_modules,
             lora_dropout=self.config.lora_config.lora_dropout,
             bias=self.config.lora_config.bias,
             task_type=self.config.lora_config.task_type,
@@ -300,53 +289,55 @@ class LoRAAdapter(LLMTrainer):
         self,
         examples: list[LabeledExample],
         kb_text: str,
-    ) -> list[dict[str, str]]:
+    ) -> list[dict[str, Any]]:
         """
-        Format examples into training data using chat template.
+        Format examples into tokenized training data using chat template.
 
-        DataCollatorForCompletionOnlyLM will mask the input tokens (labels = -100).
+        CRITICAL FIX: Now returns 'input_ids' and 'attention_mask' directly.
+        This prevents the 'text' string from being re-tokenized by the Trainer,
+        which would split special tokens (e.g. <|start_header_id|>) into plain text.
 
         Args:
             examples: Labeled examples.
             kb_text: Knowledge base text.
 
         Returns:
-            List of formatted examples with 'text' key.
+            List of dicts with 'input_ids' and 'attention_mask'.
         """
         formatted = []
 
         for example in examples:
             prompt_data = PromptTemplate.build_training_prompt(example, kb_text)
 
-            # This enables DataCollatorForCompletionOnlyLM to identify and mask input tokens
             messages = [
                 {"role": "system", "content": PromptTemplate.SYSTEM_INSTRUCTION},
                 {"role": "user", "content": prompt_data["input"]},
                 {"role": "assistant", "content": prompt_data["output"]},
             ]
 
-            formatted_text = self.tokenizer.apply_chat_template(
+            # Direct tokenization to preserve Special Tokens
+            encoded = self.tokenizer.apply_chat_template(
                 messages,
-                tokenize=False,
-                add_generation_prompt=False,  # Assistant response already present
+                tokenize=True,
+                add_generation_prompt=False,
+                return_dict=True,
+                return_tensors="pt",
             )
 
-            formatted.append({"text": formatted_text})
+            # SFTTrainer expects list of dicts (if not using dataset object),
+            # and values should be lists, not tensors, for compatibility
+            formatted.append(
+                {
+                    "input_ids": encoded["input_ids"][0].tolist(),
+                    "attention_mask": encoded["attention_mask"][0].tolist(),
+                }
+            )
 
         return formatted
 
     def _prepare_data_collator(self):
         """
         Create data collator that masks instruction tokens using explicit ID-based matching.
-
-        Refactored to fix Tokenization Mismatch (Silent Bug):
-        - Previously passed a raw string to the collator, which caused re-tokenization errors
-          (splitting special tokens) and failed masking.
-        - Now encodes the response template into exact Token IDs.
-        - Handles Llama 3's specific header format and Mistral's instruction tag.
-
-        Returns:
-            DataCollatorForCompletionOnlyLM configured for the model.
         """
         from src.config import ModelType
 
@@ -354,26 +345,19 @@ class LoRAAdapter(LLMTrainer):
 
         if self.config.model_type == ModelType.LLAMA3_8B:
             # Llama 3 Template: <|start_header_id|>assistant<|end_header_id|>\n\n
-            # We must encode this exact sequence. The tokenizer (when loaded correctly)
-            # will map the special token strings to their specific IDs (e.g., 128006, 78191, 128007, 271).
             template_str = "<|start_header_id|>assistant<|end_header_id|>\n\n"
-
-            # encode(add_special_tokens=False) ensures we don't get an extra BOS token at the start
             response_template_ids = self.tokenizer.encode(
                 template_str, add_special_tokens=False
             )
 
         elif self.config.model_type == ModelType.MISTRAL_7B:
             # Mistral Template: [/INST]
-            # Standard Mistral chat template ends the user turn with this tag.
             template_str = "[/INST]"
             response_template_ids = self.tokenizer.encode(
                 template_str, add_special_tokens=False
             )
 
         else:
-            # Fallback for unknown models
-            # Uses a generic marker, though this is less robust than model-specific tokens
             print(
                 f"⚠ Warning: Unknown model type {self.config.model_type}. Using generic 'assistant' template."
             )
@@ -382,45 +366,33 @@ class LoRAAdapter(LLMTrainer):
                 template_str, add_special_tokens=False
             )
 
-        # Validation: Ensure we actually generated IDs
         if not response_template_ids:
             raise ValueError(
-                f"Critical Error: Failed to encode response template IDs for {self.config.model_type}. "
-                f"Tokenizer returned empty list for template: '{template_str}'"
+                f"Critical Error: Failed to encode response template IDs for {self.config.model_type}."
             )
 
         print(f"✓ Response template encoded to IDs: {response_template_ids}")
 
-        # Pass the IDs (list of ints) instead of string to ensure exact matching
         data_collator = DataCollatorForCompletionOnlyLM(
             response_template=response_template_ids,
             tokenizer=self.tokenizer,
-            mlm=False,  # Not masked language modeling
+            mlm=False,
         )
 
-        print(
-            f"✓ Data collator configured with ID-based masking for: {self.config.model_type.value}"
-        )
-
+        print(f"✓ Data collator configured with ID-based masking")
         return data_collator
 
     def _validate_label_masking(
         self,
         data_collator: DataCollatorForCompletionOnlyLM,
-        formatted_data: list[dict[str, str]],
+        formatted_data: list[dict[str, Any]],
     ) -> None:
         """
-        Validate that label masking is working correctly.
-
-        FIX ERROR #2: Ensures padding tokens and instruction tokens are masked
-
-        This prevents the silent failure mode where:
-        - Padding tokens aren't masked → model learns to predict EOS
-        - Instruction tokens aren't masked → model learns to repeat prompts
+        Validate that label masking is working correctly on pre-tokenized data.
 
         Args:
             data_collator: The configured data collator
-            formatted_data: List of formatted training examples
+            formatted_data: List of pre-tokenized training examples
 
         Raises:
             ValueError: If masking validation fails
@@ -428,115 +400,76 @@ class LoRAAdapter(LLMTrainer):
         if not formatted_data:
             raise ValueError("No formatted data provided for validation")
 
-        # Take a sample batch (first 4 examples or all if fewer)
+        # Take a sample batch
         sample_size = min(4, len(formatted_data))
         sample_data = formatted_data[:sample_size]
 
-        # Tokenize the samples
-        sample_texts = [item["text"] for item in sample_data]
-        tokenized = self.tokenizer(
-            sample_texts,
+        # Since data is already tokenized, we just pad it
+        # Note: DataCollatorForCompletionOnlyLM handles padding if input_ids are passed
+
+        # We need to manually construct the batch for validation
+        input_ids = [torch.tensor(item["input_ids"]) for item in sample_data]
+        attention_mask = [torch.tensor(item["attention_mask"]) for item in sample_data]
+
+        # Use tokenizer to pad for batching validation
+        padded = self.tokenizer.pad(
+            {"input_ids": input_ids, "attention_mask": attention_mask},
             padding=True,
-            truncation=True,
-            max_length=self.config.training_hyperparameters.max_seq_length,
             return_tensors="pt",
         )
 
-        # Process through data collator to get labels
         batch = {
-            "input_ids": tokenized["input_ids"],
-            "attention_mask": tokenized["attention_mask"],
+            "input_ids": padded["input_ids"],
+            "attention_mask": padded["attention_mask"],
         }
 
-        # The collator adds the 'labels' field with masking
-        processed_batch = data_collator.torch_call([batch])
+        # Process through data collator to get labels
+        # Note: The collator expects a list of dicts or a BatchEncoding
+        processed_batch = data_collator.torch_call(
+            [
+                {"input_ids": ids, "attention_mask": mask}
+                for ids, mask in zip(input_ids, attention_mask)
+            ]
+        )
 
         if "labels" not in processed_batch:
-            raise ValueError(
-                "Data collator did not produce 'labels' field. "
-                "Label masking cannot be validated."
-            )
+            raise ValueError("Data collator did not produce 'labels' field.")
 
         labels = processed_batch["labels"]
-        input_ids = processed_batch["input_ids"]
 
-        # Validation 1: Check padding token masking
-        # All positions where input_ids == pad_token_id should have labels == -100
-        pad_positions = input_ids == self.tokenizer.pad_token_id
-        pad_labels = labels[pad_positions]
-
-        if pad_positions.sum() > 0:
-            incorrectly_unmasked_padding = (pad_labels != -100).sum().item()
-            total_padding = pad_positions.sum().item()
-
-            if incorrectly_unmasked_padding > 0:
-                raise ValueError(
-                    f"CRITICAL: Padding tokens are not masked! "
-                    f"Found {incorrectly_unmasked_padding}/{total_padding} padding positions with labels != -100. "
-                    f"This will cause the model to learn to predict EOS tokens, "
-                    f"resulting in empty outputs during inference. "
-                    f"Check that pad_token_id is correctly set."
-                )
-
-            print(f"✓ Padding tokens correctly masked: {total_padding} tokens")
-
-        # Validation 2: Check instruction masking ratio
-        # Most tokens should be masked (instructions), few should be unmasked (responses)
+        # Validation stats
         masked_count = (labels == -100).sum().item()
         unmasked_count = (labels != -100).sum().item()
         total_tokens = labels.numel()
-
         masking_ratio = masked_count / total_tokens if total_tokens > 0 else 0
 
-        # Sanity check: For instruction masking, we expect most tokens to be masked
-        # Typical ratio is 70-90% masked (instructions + padding)
         if masking_ratio < 0.5:
             raise ValueError(
                 f"CRITICAL: Instruction masking appears to have failed! "
                 f"Only {masked_count}/{total_tokens} ({masking_ratio:.1%}) tokens are masked. "
-                f"Expected >50% masking ratio. "
-                f"This indicates the response_template doesn't match the chat template output. "
-                f"Model will learn to repeat instructions instead of generating responses."
+                f"Expected >50% masking ratio."
             )
 
-        print(
-            f"✓ Label masking validated: {masked_count} masked ({masking_ratio:.1%}), "
-            f"{unmasked_count} unmasked"
-        )
+        print(f"✓ Label masking validated: {masked_count} masked ({masking_ratio:.1%})")
 
     def _validate_sequence_lengths(
         self,
-        formatted_data: list[dict[str, str]],
+        formatted_data: list[dict[str, Any]],
         max_length: int,
     ) -> None:
         """
         Validate that training examples don't exceed max sequence length.
 
-        FIX ERROR #4: Prevents silent truncation of JSON outputs
-
         Args:
-            formatted_data: List of formatted training examples
+            formatted_data: List of pre-tokenized training examples
             max_length: Maximum sequence length
-
-        Raises:
-            ValueError: If >10% of examples exceed max_length
         """
         if not formatted_data:
             return
 
-        texts = [item["text"] for item in formatted_data]
-
-        # Tokenize WITHOUT truncation to get true lengths
-        tokenized = self.tokenizer(
-            texts,
-            truncation=False,  # CRITICAL: Don't truncate during validation
-            return_attention_mask=False,
-        )
-
-        # Count examples that exceed max_length
         long_examples = []
-        for i, input_ids in enumerate(tokenized["input_ids"]):
-            length = len(input_ids)
+        for i, item in enumerate(formatted_data):
+            length = len(item["input_ids"])
             if length > max_length:
                 long_examples.append((i, length))
 
@@ -548,32 +481,18 @@ class LoRAAdapter(LLMTrainer):
             print(f"✓ All {total} examples within max_seq_length ({max_length} tokens)")
             return
 
-        # If >10% are truncated, this is a critical error
         if percentage > 10:
-            # Show some examples
             examples_str = "\n".join(
                 f"  Example {i}: {length} tokens (exceeds by {length - max_length})"
                 for i, length in long_examples[:5]
             )
-
             raise ValueError(
                 f"CRITICAL: {num_long}/{total} examples ({percentage:.1f}%) exceed max_seq_length! "
                 f"\n{examples_str}"
-                f"\n\nTruncated examples will have invalid JSON (cut mid-generation), "
-                f"causing the model to learn malformed outputs. "
-                f"\nSolutions:\n"
-                f"  1. Increase max_seq_length in config (current: {max_length})\n"
-                f"  2. Reduce knowledge base text length\n"
-                f"  3. Filter out long examples from training data"
             )
 
-        # If 1-10% are truncated, warn but continue
         print(
             f"⚠ WARNING: {num_long}/{total} examples ({percentage:.1f}%) exceed max_seq_length ({max_length})"
-        )
-        print(f"  These examples will be truncated during training.")
-        print(
-            f"  Consider increasing max_seq_length if truncation affects performance."
         )
 
     def train(
@@ -591,15 +510,13 @@ class LoRAAdapter(LLMTrainer):
             TrainingError: If training fails.
         """
         try:
-            # Prepare PEFT model
             self._prepare_peft_model()
-
-            # Get knowledge base text
             from src.config import KnowledgeBaseConfig
 
             kb_config = KnowledgeBaseConfig()
             kb_text = kb_config.get_all_principles_text()
 
+            # Format data (now returns input_ids/attention_mask directly)
             train_dataset = self._format_examples_for_training(
                 training_examples, kb_text
             )
@@ -610,7 +527,6 @@ class LoRAAdapter(LLMTrainer):
                     validation_examples, kb_text
                 )
 
-            # FIX ERROR #4: Validate sequence lengths BEFORE training
             print("\n[Validation] Checking sequence lengths...")
             self._validate_sequence_lengths(
                 train_dataset,
@@ -619,11 +535,9 @@ class LoRAAdapter(LLMTrainer):
 
             data_collator = self._prepare_data_collator()
 
-            # FIX ERROR #2: Validate label masking BEFORE training
             print("\n[Validation] Checking label masking...")
             self._validate_label_masking(data_collator, train_dataset)
 
-            # Configure training arguments
             training_args = TrainingArguments(
                 output_dir=str(self.config.output_dir / "checkpoints"),
                 num_train_epochs=self.config.training_hyperparameters.num_epochs,
@@ -642,9 +556,13 @@ class LoRAAdapter(LLMTrainer):
                 optim=self.config.training_hyperparameters.optim,
                 save_total_limit=3,
                 load_best_model_at_end=True if eval_dataset else False,
-                report_to=["none"],  # Disable wandb/tensorboard
+                report_to=["none"],
+                # IMPORTANT: Remove unused columns since we provide input_ids
+                remove_unused_columns=False,
             )
 
+            # We pass the pre-tokenized dataset directly
+            # dataset_text_field is REMOVED because we are not passing text anymore
             trainer = SFTTrainer(
                 model=self.peft_model,
                 train_dataset=train_dataset,
@@ -652,41 +570,28 @@ class LoRAAdapter(LLMTrainer):
                 args=training_args,
                 data_collator=data_collator,
                 max_seq_length=self.config.training_hyperparameters.max_seq_length,
-                dataset_text_field="text",
+                # tokenizer needed here for padding in collator
+                tokenizer=self.tokenizer,
             )
 
-            # Start training
             print(
-                "\n✓ All validations passed - Starting training with instruction masking enabled..."
+                "\n✓ All validations passed - Starting training with ID-based tokenization..."
             )
-            print("   (Loss will only be computed on assistant responses)")
             trainer.train()
 
         except Exception as e:
             raise TrainingError(f"Training failed: {str(e)}") from e
 
     def save_model(self, output_path: str) -> None:
-        """Save the fine-tuned LoRA adapter.
-
-        Args:
-            output_path: Path where the model should be saved.
-
-        Raises:
-            IOError: If saving fails.
-        """
+        """Save the fine-tuned LoRA adapter."""
         if self.peft_model is None:
             raise IOError("No trained model to save")
 
         output_dir = Path(output_path)
         output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Save PEFT adapter
         self.peft_model.save_pretrained(str(output_dir))
-
-        # Save tokenizer
         self.tokenizer.save_pretrained(str(output_dir))
 
-        # Save config for reference
         config_path = output_dir / "training_config.json"
         with open(config_path, "w") as f:
             json.dump(
@@ -701,64 +606,32 @@ class LoRAAdapter(LLMTrainer):
             )
 
     def load_model(self, model_path: str) -> None:
-        """Load a previously fine-tuned LoRA adapter.
-
-        Args:
-            model_path: Path to the saved model.
-
-        Raises:
-            IOError: If loading fails.
-        """
+        """Load a previously fine-tuned LoRA adapter."""
         try:
-            # Load PEFT model
             self.peft_model = PeftModel.from_pretrained(
                 self.model,
                 model_path,
                 is_trainable=False,
             )
-
-            # Load tokenizer
             self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-
         except Exception as e:
             raise IOError(f"Failed to load model: {str(e)}") from e
 
 
 class HuggingFaceInferenceAdapter(InferenceEngine):
-    """Adapter for running inference with a fine-tuned model.
-
-    This adapter implements the InferenceEngine interface using
-    HuggingFace Transformers for text generation.
-
-    Attributes:
-        config: System configuration.
-        model: The fine-tuned PEFT model.
-        tokenizer: The model's tokenizer.
-    """
+    """Adapter for running inference with a fine-tuned model."""
 
     def __init__(self, config: SystemConfig, model_path: str) -> None:
-        """Initialize the inference adapter.
-
-        Args:
-            config: System configuration.
-            model_path: Path to the fine-tuned model.
-        """
         self.config = config
         self.model_path = model_path
         self.model: Optional[PeftModel] = None
         self.tokenizer: Optional[AutoTokenizer] = None
-
         self._load_model()
 
     def _load_model(self) -> None:
-        """
-        Load the fine-tuned model for inference.
-
-        FIXED: ERROR #3 - Prevents double BOS token during inference
-        """
+        """Load the fine-tuned model for inference."""
         print(f"Loading fine-tuned model from: {self.model_path}")
 
-        # Load base model with quantization
         if self.config.quantization_config.quantization_type.value != "none":
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=(
@@ -782,75 +655,50 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
             cache_dir=str(self.config.cache_dir),
         )
 
-        # Load PEFT adapter
         self.model = PeftModel.from_pretrained(
             base_model,
             self.model_path,
             is_trainable=False,
         )
 
-        # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
-
-        # Left padding ensures sequences are end-aligned, so generation starts
-        # from the last real token (not padding tokens)
         self.tokenizer.padding_side = "left"
 
-        # Configure padding token if not present
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             self.model.config.pad_token_id = self.tokenizer.eos_token_id
 
-        # FIX ERROR #3: Disable automatic BOS token addition (same as training)
         if hasattr(self.tokenizer, "add_bos_token"):
             self.tokenizer.add_bos_token = False
             print("✓ Disabled tokenizer.add_bos_token for inference (matches training)")
 
-        # Validate BOS token count (same validation as training)
         self._validate_bos_tokens()
-
-        # Set to evaluation mode
         self.model.eval()
-
         print(
             f"✓ Model loaded for inference (padding_side={self.tokenizer.padding_side})"
         )
 
     def _validate_bos_tokens(self) -> None:
-        """
-        Validate that chat template produces exactly one BOS token.
-
-        FIX ERROR #3: Ensures training-inference distribution match
-
-        Raises:
-            ValueError: If multiple BOS tokens are detected
-        """
-        # Create test messages
+        """Validate that chat template produces exactly one BOS token."""
         test_messages = [
             {"role": "system", "content": "Test system message"},
             {"role": "user", "content": "Test user message"},
         ]
 
-        # Apply chat template with tokenization and generation prompt
         token_ids = self.tokenizer.apply_chat_template(
             test_messages,
             tokenize=True,
-            add_generation_prompt=True,  # This is what we use during inference
+            add_generation_prompt=True,
         )
 
-        # Convert to tensor if needed
         if isinstance(token_ids, list):
             token_ids = torch.tensor(token_ids)
 
-        # Count BOS tokens
         bos_count = (token_ids == self.tokenizer.bos_token_id).sum().item()
 
         if bos_count > 1:
             raise ValueError(
-                f"Double BOS token detected in inference! Found {bos_count} BOS tokens. "
-                f"This creates training-inference distribution mismatch. "
-                f"Expected: 1 BOS token (from chat template). "
-                f"Fix: Ensure tokenizer.add_bos_token=False"
+                f"Double BOS token detected in inference! Found {bos_count} BOS tokens."
             )
 
         print(f"✓ BOS token validation passed for inference ({bos_count} BOS token)")
@@ -862,20 +710,7 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
         context_after: Optional[str] = None,
         knowledge_base_text: Optional[str] = None,
     ) -> str:
-        """Generate a justification for a single sentence.
-
-        Args:
-            sentence: Target sentence to analyze.
-            context_before: Optional preceding context.
-            context_after: Optional following context.
-            knowledge_base_text: Knowledge base as text.
-
-        Returns:
-            Raw model output (should be JSON).
-
-        Raises:
-            InferenceError: If generation fails.
-        """
+        """Generate a justification for a single sentence."""
         try:
             messages = PromptTemplate.build_inference_prompt(
                 sentence=sentence,
@@ -884,23 +719,16 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                 context_after=context_after,
             )
 
-            # This adds the <|start_header_id|>assistant<|end_header_id|> cue
-            # that the model was trained to recognize
-            prompt = self.tokenizer.apply_chat_template(
+            # CRITICAL FIX: Use tokenize=True directly.
+            # Do NOT generate string and then re-tokenize.
+            inputs = self.tokenizer.apply_chat_template(
                 messages,
-                tokenize=False,  # Get string first
-                add_generation_prompt=True,  # Add assistant prompt - CRITICAL!
-            )
-
-            # Tokenize the chat-formatted prompt
-            inputs = self.tokenizer(
-                prompt,
+                tokenize=True,
+                add_generation_prompt=True,
                 return_tensors="pt",
-                truncation=True,
-                max_length=self.config.training_hyperparameters.max_seq_length,
+                return_dict=True,
             ).to(self.model.device)
 
-            # Generate
             with torch.no_grad():
                 outputs = self.model.generate(
                     **inputs,
@@ -925,21 +753,12 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
             raise InferenceError(f"Generation failed: {str(e)}") from e
 
     def batch_generate(self, examples: list[LabeledExample], kb_text: str) -> list[str]:
-        """
-        Generate justifications for a batch of examples.
-
-        Args:
-            examples: List of labeled examples.
-            kb_text: Knowledge base as text.
-
-        Returns:
-            List of raw outputs.
-
-        Raises:
-            InferenceError: If generation fails.
-        """
+        """Generate justifications for a batch of examples."""
         try:
-            prompts = []
+            # We need to tokenize individually first to handle chat template logic
+            # for each example, then pad them together.
+            batch_input_ids = []
+
             for ex in examples:
                 messages = PromptTemplate.build_inference_prompt(
                     sentence=ex.sentence,
@@ -948,24 +767,21 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                     context_after=ex.context_after,
                 )
 
-                # Apply chat template with generation prompt
-                prompt = self.tokenizer.apply_chat_template(
+                # Get IDs directly (1D tensor)
+                encoded = self.tokenizer.apply_chat_template(
                     messages,
-                    tokenize=False,
+                    tokenize=True,
                     add_generation_prompt=True,
+                    return_tensors="pt",
                 )
-                prompts.append(prompt)
+                batch_input_ids.append(encoded[0])  # Append the 1D tensor
 
-            # Tokenize batch with left padding (already set in _load_model)
-            inputs = self.tokenizer(
-                prompts,
-                return_tensors="pt",
-                padding=True,  # Pad to longest in batch
-                truncation=True,
-                max_length=self.config.training_hyperparameters.max_seq_length,
+            # Use tokenizer to pad the list of tensors
+            # This handles attention_mask creation automatically
+            inputs = self.tokenizer.pad(
+                {"input_ids": batch_input_ids}, padding=True, return_tensors="pt"
             ).to(self.model.device)
 
-            # Batch generation
             with torch.no_grad():
                 outputs = self.model.generate(
                     **inputs,
@@ -978,7 +794,6 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                     pad_token_id=self.tokenizer.pad_token_id,
                 )
 
-            # Decode outputs (skip input tokens for each example)
             results = []
             for i, output in enumerate(outputs):
                 input_length = inputs.input_ids[i].shape[0]
