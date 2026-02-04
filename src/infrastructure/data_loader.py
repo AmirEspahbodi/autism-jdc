@@ -49,7 +49,22 @@ class MockDataLoader(DataLoader):
         Returns:
             List of synthetic labeled training examples.
         """
+        # Train uses offset 0
         return self._generate_examples(self.num_train_examples, offset=0)
+
+    def load_validation_data(self) -> list[LabeledExample]:
+        """Generate mock validation examples.
+
+        # FIX: Data Leakage Prevention
+        Uses a distinct offset (500) to ensure validation data is mathematically
+        distinct from Training (0+) and Test (1000+) data.
+
+        Returns:
+            List of synthetic labeled validation examples.
+        """
+        # Validation uses offset 500 (distinct from train and test)
+        # Use same size as test set for simplicity
+        return self._generate_examples(self.num_test_examples, offset=500)
 
     def load_test_data(self) -> list[LabeledExample]:
         """Generate mock test examples.
@@ -57,6 +72,7 @@ class MockDataLoader(DataLoader):
         Returns:
             List of synthetic labeled test examples.
         """
+        # Test uses offset 1000
         return self._generate_examples(self.num_test_examples, offset=1000)
 
     def _generate_examples(self, count: int, offset: int = 0) -> list[LabeledExample]:
@@ -179,7 +195,7 @@ class MockDataLoader(DataLoader):
                 {
                     "sentence": "All autistic people are math geniuses who can't socialize.",
                     "context_before": "There are many stereotypes about autism.",
-                    "context_after": None,
+                    "context_after": "None",
                     "justification": "This makes overgeneralized assumptions about all autistic individuals, stereotyping both their abilities and social skills.",
                     "evidence": "All autistic people are math geniuses who can't socialize",
                 },
@@ -237,7 +253,7 @@ class FileBasedDataLoader(DataLoader):
         """Initialize the file-based data loader.
 
         Args:
-            data_dir: Directory containing train.json and test.json.
+            data_dir: Directory containing train.json, val.json, and test.json.
         """
         self.data_dir = data_dir
 
@@ -251,6 +267,30 @@ class FileBasedDataLoader(DataLoader):
             DataLoadError: If loading fails.
         """
         return self._load_from_file(self.data_dir / "train.json")
+
+    def load_validation_data(self) -> list[LabeledExample]:
+        """Load validation data from file.
+
+        # FIX: Data Leakage Prevention
+        Attempts to load 'val.json' or 'validation.json'.
+
+        Returns:
+            List of labeled validation examples.
+
+        Raises:
+            DataLoadError: If loading fails.
+        """
+        # Try different common names
+        for filename in ["val.json", "validation.json", "dev.json"]:
+            path = self.data_dir / filename
+            if path.exists():
+                return self._load_from_file(path)
+
+        raise DataLoadError(
+            f"No validation file found in {self.data_dir}. "
+            "Expected val.json, validation.json, or dev.json. "
+            "Validation data MUST be distinct from test data to prevent leakage."
+        )
 
     def load_test_data(self) -> list[LabeledExample]:
         """Load test data from file.

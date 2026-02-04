@@ -22,8 +22,12 @@ from src.domain import EvaluationMetrics, MetricsRepository, PredictionResult
 class StandardMetricsRepository(MetricsRepository):
     """Standard implementation of metrics computation using scikit-learn.
 
-    This adapter computes binary classification metrics and handles
-    cases where some predictions failed to parse.
+    This adapter computes binary classification metrics.
+
+    # FIX: SCIENTIFIC INTEGRITY
+    Parsing failures are treated as incorrect predictions (System Failures),
+    not filtered out. This prevents metric inflation where a model with
+    90% crash rate could report 100% accuracy on the few successes.
     """
 
     def compute_metrics(
@@ -38,11 +42,7 @@ class StandardMetricsRepository(MetricsRepository):
         Returns:
             Computed evaluation metrics.
         """
-        # Filter out predictions with parsing errors
-        valid_predictions = [p for p in predictions if p.predicted_label is not None]
-
-        if not valid_predictions:
-            # All predictions failed - return zeros
+        if not predictions:
             return EvaluationMetrics(
                 precision=0.0,
                 recall=0.0,
@@ -52,27 +52,62 @@ class StandardMetricsRepository(MetricsRepository):
                 false_positives=0,
                 true_negatives=0,
                 false_negatives=0,
-                total_examples=len(predictions),
-                parsing_failures=len(predictions),
+                total_examples=0,
+                parsing_failures=0,
             )
 
-        # Extract labels
-        y_true = [p.ground_truth_label for p in valid_predictions]
-        y_pred = [p.predicted_label for p in valid_predictions]
+        # REFACTOR: Do NOT filter out parsing failures.
+        # Treat them as incorrect predictions (Label -1).
+        y_true = []
+        y_pred = []
+        parsing_failures = 0
 
-        # Compute metrics
-        precision = precision_score(y_true, y_pred, zero_division=0.0)
-        recall = recall_score(y_true, y_pred, zero_division=0.0)
-        f1 = f1_score(y_true, y_pred, zero_division=0.0)
-        accuracy = accuracy_score(y_true, y_pred)
+        for p in predictions:
+            y_true.append(p.ground_truth_label)
 
-        # Compute confusion matrix values
+            if p.predicted_label is None:
+                # Assign -1 for parsing failure (System Error)
+                # This ensures it doesn't match 0 or 1, penalizing Accuracy.
+                y_pred.append(-1)
+                parsing_failures += 1
+            else:
+                y_pred.append(p.predicted_label)
+
+        # Calculate Confusion Matrix terms manually to ensure strict control
+        # over how the "-1" (Parsing Error) is handled.
+
+        # True Positive: Predicted Ableist (1) and was Ableist (1)
         tp = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 1 and yp == 1)
-        fp = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 0 and yp == 1)
-        tn = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 0 and yp == 0)
-        fn = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 1 and yp == 0)
 
-        parsing_failures = len(predictions) - len(valid_predictions)
+        # False Positive: Predicted Ableist (1) but was Safe (0)
+        fp = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 0 and yp == 1)
+
+        # True Negative: Predicted Safe (0) and was Safe (0)
+        tn = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 0 and yp == 0)
+
+        # False Negative: Was Ableist (1) but Predicted NOT Ableist (0 OR -1/Error)
+        # This STRICTLY penalizes Recall for system failures on critical class.
+        fn = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 1 and yp != 1)
+
+        # Accuracy terms:
+        # Correct = TP + TN
+        # Total = len(predictions)
+        # Note: Parsing failures on GT=0 end up here as "incorrect" (neither TP nor TN)
+        # This strictly penalizes accuracy.
+
+        # Compute Metrics (Standard definitions)
+        # Handle zero division safely
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+
+        # F1 Score
+        if (precision + recall) > 0:
+            f1 = 2 * (precision * recall) / (precision + recall)
+        else:
+            f1 = 0.0
+
+        # Accuracy
+        accuracy = (tp + tn) / len(predictions)
 
         return EvaluationMetrics(
             precision=float(precision),

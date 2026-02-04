@@ -77,7 +77,10 @@ class FineTuneModelUseCase:
         if use_validation:
             try:
                 print("\n[2/4] Loading validation data...")
-                validation_examples = self.data_loader.load_test_data()
+                # FIX: PREVENT DATA LEAKAGE
+                # Previously used load_test_data(), which contaminated the model with test set.
+                # Now explicitly loads distinct validation set.
+                validation_examples = self.data_loader.load_validation_data()
                 print(f"✓ Loaded {len(validation_examples)} validation examples")
             except Exception as e:
                 print(f"⚠ Warning: Could not load validation data: {e}")

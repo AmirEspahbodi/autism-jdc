@@ -213,6 +213,21 @@ class DataLoader(ABC):
         pass
 
     @abstractmethod
+    def load_validation_data(self) -> list[LabeledExample]:
+        """Load validation examples.
+
+        # REFACTOR: Added to prevent data leakage. Validation data must
+        be distinct from test data.
+
+        Returns:
+            List of labeled validation examples.
+
+        Raises:
+            DataLoadError: If loading fails.
+        """
+        pass
+
+    @abstractmethod
     def load_test_data(self) -> list[LabeledExample]:
         """Load test examples.
 
