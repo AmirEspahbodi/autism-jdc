@@ -118,11 +118,11 @@ class LoRAAdapter(LLMTrainer):
             token=self.config.hf_token,
         )
 
-        # 1. We DO NOT resize embeddings on quantized models. It corrupts weights.
-        # 2. We reuse the EOS token as PAD. This is standard for Llama/Mistral.
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # 3. Set padding side to right for SFTTrainer
+        # ADD THIS LINE:
+        self.model.config.pad_token_id = self.tokenizer.pad_token_id
+
         self.tokenizer.padding_side = "right"
 
         # 4. Disable manual BOS addition; let apply_chat_template handle it
