@@ -17,7 +17,7 @@ from transformers import (
     Trainer,
     TrainingArguments,
 )
-from trl import SFTTrainer
+from trl import SFTConfig, SFTTrainer
 
 from src.config import ModelType, SystemConfig
 from src.domain import (
@@ -108,12 +108,14 @@ class LoRAAdapter(LLMTrainer):
             device_map="auto",
             trust_remote_code=True,
             cache_dir=str(self.config.cache_dir),
+            token=self.config.hf_token,
         )
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.config.model_type.value,
             trust_remote_code=True,
             cache_dir=str(self.config.cache_dir),
+            token=self.config.hf_token,
         )
 
         # 1. We DO NOT resize embeddings on quantized models. It corrupts weights.
@@ -126,22 +128,6 @@ class LoRAAdapter(LLMTrainer):
         # 4. Disable manual BOS addition; let apply_chat_template handle it
         if hasattr(self.tokenizer, "add_bos_token"):
             self.tokenizer.add_bos_token = False
-
-            # Update: Added token=self.config.hf_token
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.config.model_type.value,
-                quantization_config=bnb_config,
-                device_map="auto",
-                trust_remote_code=True,
-                cache_dir=str(self.config.cache_dir),
-            )
-
-            # Update: Added token=self.config.hf_token
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.config.model_type.value,
-                trust_remote_code=True,
-                cache_dir=str(self.config.cache_dir),
-            )
 
     def _prepare_peft_model(self) -> None:
         self.model = prepare_model_for_kbit_training(self.model)
@@ -259,75 +245,6 @@ class LoRAAdapter(LLMTrainer):
         except Exception as e:
             raise TrainingError(f"Training failed: {str(e)}") from e
 
-    def _prepare_data_collator(self):
-        """
-        Configure the data collator with the correct response separator
-        dynamically derived from the tokenizer.
-        """
-        # Create a dummy user message to detect the template structure
-        # We use a placeholder content that won't confuse regex logic
-        messages = [{"role": "user", "content": "DETECT_RESPONSE_TEMPLATE"}]
-
-        # 1. Apply template WITHOUT generation prompt (just the user instruction)
-        prompt_no_gen = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=False
-        )
-
-        # 2. Apply template WITH generation prompt (includes the assistant start token)
-        prompt_with_gen = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-
-        # 3. Extract the response template (the difference between the two)
-        response_template = ""
-        if prompt_with_gen.startswith(prompt_no_gen):
-            response_template = prompt_with_gen[len(prompt_no_gen) :]
-
-        # 4. Fallback Logic:
-        # If the diff is empty (common in older templates that don't support add_generation_prompt)
-        # or if derivation failed, we try heuristics or standard templates.
-        if not response_template.strip():
-            print(
-                "⚠ Warning: Could not dynamically derive response template via suffix diff."
-            )
-
-            # Explicit Model Type Checks for Known Architectures
-            if (
-                self.config.model_type == ModelType.LLAMA3_8B
-                or "llama-3" in self.config.model_type.value.lower()
-            ):
-                # Llama 3 specific header token.
-                # CRITICAL: Do NOT add newline here; Llama 3 uses special tokens.
-                response_template = "<|start_header_id|>assistant<|end_header_id|>"
-            elif "[/INST]" in prompt_no_gen:
-                # Mistral / Llama 2 style where the closing tag IS the separator
-                response_template = "[/INST]"
-            else:
-                # Generic fallback (Instruction format)
-                response_template = "### Response:\n"
-
-            print(f"  Falling back to heuristic: {repr(response_template)}")
-
-        # Validate response template was successfully derived
-        if not response_template or not response_template.strip():
-            raise ValueError(
-                "Failed to derive response template from tokenizer. "
-                "Data collator cannot mask input tokens without a valid separator. "
-                f"Model type: {self.config.model_type.value}"
-            )
-
-        print(
-            f"✓ Data collator configured using response template: {repr(response_template)}"
-        )
-
-        data_collator = DataCollatorForCompletionOnlyLM(
-            response_template=response_template,
-            tokenizer=self.tokenizer,
-            mlm=False,
-        )
-
-        return data_collator
-
     def save_model(self, output_path: str) -> None:
         if self.peft_model is None:
             raise IOError("No trained model to save")
@@ -381,6 +298,7 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                 self.config.model_type.value,
                 trust_remote_code=True,
                 cache_dir=str(self.config.cache_dir),
+                token=self.config.hf_token,
             )
 
             # 2. Tokenizer Hygiene (Matching Training)
@@ -401,6 +319,7 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                 device_map="auto",
                 trust_remote_code=True,
                 cache_dir=str(self.config.cache_dir),
+                token=self.config.hf_token,
             )
 
             # 4. Load LoRA Adapter
