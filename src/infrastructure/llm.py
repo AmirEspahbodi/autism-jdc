@@ -203,8 +203,7 @@ class LoRAAdapter(LLMTrainer):
                 train_dataset=train_dataset,
                 eval_dataset=eval_dataset,
                 args=training_args,
-                tokenizer=self.tokenizer,
-                # No data_collator needed; SFTTrainer handles messages format automatically
+                processing_class=self.tokenizer,
             )
 
             trainer.train()
