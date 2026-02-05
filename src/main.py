@@ -323,7 +323,7 @@ Examples:
     from src.config import ModelType
 
     config = SystemConfig(
-        model_type=ModelType.MISTRAL_7B
+        model_type=ModelType.LLAMA3_8B
         if args.model == "llama3"
         else ModelType.MISTRAL_7B,
         output_dir=Path(args.output_dir),
