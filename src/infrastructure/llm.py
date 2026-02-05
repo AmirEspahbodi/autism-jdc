@@ -102,10 +102,8 @@ class LoRAAdapter(LLMTrainer):
         else:
             bnb_config = None
 
-        # FIX: Explicitly set torch_dtype=torch.float16.
-        # Mistral v0.3 defaults to bfloat16 in config.json, which causes
-        # "_amp_foreach_non_finite_check_and_unscale_cuda" errors on Tesla T4
-        # (which doesn't support BF16 native ops).
+        # Mistral v0.3 defaults to bfloat16 in config.json.
+        # We load with torch_dtype=torch.float16, but we must also override the config below.
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_type.value,
             quantization_config=bnb_config,
@@ -116,6 +114,14 @@ class LoRAAdapter(LLMTrainer):
             torch_dtype=torch.float16,
         )
 
+        # --- CRITICAL FIX FOR T4 GPU / MISTRAL v0.3 ---
+        # The model config still thinks it is bfloat16, which tricks PEFT into
+        # initializing adapters in bfloat16, causing T4 crashes.
+        self.model.config.torch_dtype = torch.float16
+        self.model.config.use_cache = False
+        self.model.config.pretraining_tp = 1
+        # ----------------------------------------------
+
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.config.model_type.value,
             trust_remote_code=True,
@@ -124,10 +130,7 @@ class LoRAAdapter(LLMTrainer):
         )
 
         self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        # ADD THIS LINE:
         self.model.config.pad_token_id = self.tokenizer.pad_token_id
-
         self.tokenizer.padding_side = "right"
 
         # 4. Disable manual BOS addition; let apply_chat_template handle it
@@ -181,8 +184,8 @@ class LoRAAdapter(LLMTrainer):
             if validation_examples:
                 eval_dataset = self._format_examples_for_training(validation_examples)
 
-            # SFTConfig setup for newer TRL versions
-            # FIX: Explicitly disable bf16 to ensure Trainer uses fp16 on T4
+            # SFTConfig setup
+            # Explicitly disable bf16 to ensure Trainer uses fp16 on T4
             training_args = SFTConfig(
                 output_dir=str(self.config.output_dir / "checkpoints"),
                 num_train_epochs=self.config.training_hyperparameters.num_epochs,
@@ -275,18 +278,15 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
             )
 
             # 2. Tokenizer Hygiene (Matching Training)
-            # Use EOS as PAD. Do NOT add new tokens or resize embeddings.
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
             # Disable auto BOS (we rely on chat template)
             if hasattr(self.tokenizer, "add_bos_token"):
                 self.tokenizer.add_bos_token = False
 
-            # Configure for inference (left padding is crucial for generation)
             self.tokenizer.padding_side = "left"
 
             # 3. Load Base Model
-            # FIX: Explicitly set torch_dtype=torch.float16 here as well for consistency
             base_model = AutoModelForCausalLM.from_pretrained(
                 self.config.model_type.value,
                 quantization_config=bnb_config,
@@ -317,7 +317,6 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
         """
         Single generation with strict slicing to return ONLY new tokens.
         """
-        # Build messages and apply template
         messages = PromptTemplate.build_inference_messages(
             sentence, kb_text, context_before, context_after
         )
@@ -326,8 +325,6 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
         )
 
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
-
-        # Calculate input length for slicing later
         input_len = inputs.input_ids.shape[1]
 
         with torch.no_grad():
@@ -339,9 +336,7 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                 pad_token_id=self.tokenizer.pad_token_id,
             )
 
-        # Slice the output to exclude the input prompt
         generated_tokens = outputs[0][input_len:]
-
         return self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
     def batch_generate(
@@ -351,7 +346,6 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
     ) -> list[str]:
         """
         Generate completions for a batch of examples.
-        Uses apply_chat_template for consistency.
         """
         if not examples:
             return []
@@ -359,7 +353,6 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
         prompts = []
         for ex in examples:
             if ex.input_prompt:
-                # Wrap preformatted prompt in user message
                 messages = [{"role": "user", "content": ex.input_prompt}]
                 p = self.tokenizer.apply_chat_template(
                     messages, tokenize=False, add_generation_prompt=True
@@ -386,9 +379,6 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
             ).to(self.model.device)
 
             input_ids = inputs.input_ids
-            # Keep track of input lengths for each item in batch
-            # (Note: due to left padding, simple slicing is harder, but since
-            # we return new tokens only, we can use the input width relative to output)
             input_width = input_ids.shape[1]
 
             with torch.no_grad():
@@ -406,7 +396,6 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
 
             decoded_batch = []
             for j, output_seq in enumerate(outputs):
-                # Extract only the generated tokens
                 generated_tokens = output_seq[input_width:]
                 text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
                 decoded_batch.append(text)
