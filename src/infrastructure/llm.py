@@ -224,7 +224,7 @@ class LoRAAdapter(LLMTrainer):
                 report_to="none",
                 remove_unused_columns=False,
                 dataset_text_field="text",
-                max_seq_length=self.config.training_hyperparameters.max_seq_length,
+                max_length=self.config.training_hyperparameters.max_seq_length,
                 # NEW Completion Logic:
                 completion_only_loss=True,
                 response_template=response_template,
