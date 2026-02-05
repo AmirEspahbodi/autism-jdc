@@ -265,7 +265,7 @@ Examples:
         "--model",
         type=str,
         choices=["llama3", "mistral"],
-        default="llama3",
+        default="mistral",
         help="Base model to use (default: llama3)",
     )
 
