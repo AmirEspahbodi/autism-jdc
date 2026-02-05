@@ -102,8 +102,10 @@ class LoRAAdapter(LLMTrainer):
         else:
             bnb_config = None
 
-        # FIX: Explicitly pass torch_dtype=torch.float16 to override model default (BF16)
-        # This prevents "not implemented for 'BFloat16'" errors on T4 GPUs.
+        # FIX: Explicitly set torch_dtype=torch.float16.
+        # Mistral v0.3 defaults to bfloat16 in config.json, which causes
+        # "_amp_foreach_non_finite_check_and_unscale_cuda" errors on Tesla T4
+        # (which doesn't support BF16 native ops).
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_type.value,
             quantization_config=bnb_config,
@@ -180,6 +182,7 @@ class LoRAAdapter(LLMTrainer):
                 eval_dataset = self._format_examples_for_training(validation_examples)
 
             # SFTConfig setup for newer TRL versions
+            # FIX: Explicitly disable bf16 to ensure Trainer uses fp16 on T4
             training_args = SFTConfig(
                 output_dir=str(self.config.output_dir / "checkpoints"),
                 num_train_epochs=self.config.training_hyperparameters.num_epochs,
@@ -187,6 +190,7 @@ class LoRAAdapter(LLMTrainer):
                 gradient_accumulation_steps=self.config.training_hyperparameters.gradient_accumulation_steps,
                 learning_rate=self.config.training_hyperparameters.learning_rate,
                 fp16=self.config.training_hyperparameters.fp16,
+                bf16=False,  # Explicitly disable BF16 for T4 compatibility
                 logging_steps=self.config.training_hyperparameters.logging_steps,
                 save_steps=self.config.training_hyperparameters.save_steps,
                 eval_strategy="steps" if eval_dataset else "no",
@@ -282,7 +286,7 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
             self.tokenizer.padding_side = "left"
 
             # 3. Load Base Model
-            # FIX: Explicitly pass torch_dtype=torch.float16 to ensure T4 compatibility
+            # FIX: Explicitly set torch_dtype=torch.float16 here as well for consistency
             base_model = AutoModelForCausalLM.from_pretrained(
                 self.config.model_type.value,
                 quantization_config=bnb_config,
