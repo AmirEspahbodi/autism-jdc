@@ -21,9 +21,15 @@ class PreformattedDataLoader(DataLoader):
 
     def __init__(
         self,
-        train_path: Path = Path("./dataset/_train_dataset.json"),
-        test_path: Path = Path("./dataset/_test_dataset.json"),
-        val_path: Path = Path("./dataset/_validation_dataset.json"),
+        train_path: Path = Path(
+            "/content/drive/MyDrive/autism_jdc_dataset/_train_dataset.json"
+        ),
+        test_path: Path = Path(
+            "/content/drive/MyDrive/autism_jdc_dataset/_test_dataset.json"
+        ),
+        val_path: Path = Path(
+            "/content/drive/MyDrive/autism_jdc_dataset/_validation_dataset.json"
+        ),
         val_split_ratio: float = 0.1,
         seed: int = 42,
     ) -> None:
