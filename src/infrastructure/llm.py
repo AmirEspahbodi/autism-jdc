@@ -109,6 +109,7 @@ class LoRAAdapter(LLMTrainer):
             trust_remote_code=True,
             cache_dir=str(self.config.cache_dir),
             token=self.config.hf_token,
+            torch_dtype=torch.float16,
         )
 
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -120,7 +121,6 @@ class LoRAAdapter(LLMTrainer):
 
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # ADD THIS LINE:
         self.model.config.pad_token_id = self.tokenizer.pad_token_id
 
         self.tokenizer.padding_side = "right"
