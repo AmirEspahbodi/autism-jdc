@@ -15,7 +15,8 @@ from pydantic import BaseModel, Field, field_validator
 class ModelType(str, Enum):
     """Supported base model types."""
 
-    LLAMA3_8B = "unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit"
+    LLAMA3_8B_UNSLOSH = "unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit"
+    LLAMA3_8B_META = "unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit"
     MISTRAL_7B = "mistralai/Mistral-7B-Instruct-v0.3"
 
 
@@ -153,7 +154,7 @@ class SystemConfig(BaseModel):
         default=None,
         description="Hugging Face API token for accessing gated repositories like Llama 3.",
     )
-    model_type: ModelType = ModelType.LLAMA3_8B
+    model_type: ModelType = ModelType.LLAMA3_8B_META
     lora_config: LoRAConfig = Field(default_factory=LoRAConfig)
     quantization_config: QuantizationConfig = Field(default_factory=QuantizationConfig)
     training_hyperparameters: TrainingHyperparameters = Field(

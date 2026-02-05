@@ -253,7 +253,7 @@ Edit `src/config.py` for fine-grained control:
 from src.config import SystemConfig, ModelType, LoRAConfig
 
 config = SystemConfig(
-    model_type=ModelType.LLAMA3_8B,
+    model_type=ModelType.LLAMA3_8B_META,
     lora_config=LoRAConfig(
         r=16,                    # LoRA rank
         lora_alpha=32,           # LoRA alpha
@@ -296,7 +296,7 @@ from src.infrastructure import LoRAAdapter, PreformattedDataLoader
 
 # Configure system
 config = SystemConfig(
-    model_type=ModelType.LLAMA3_8B,
+    model_type=ModelType.LLAMA3_8B_META,
     data_dir=Path("./dataset"),
     output_dir=Path("./outputs")
 )

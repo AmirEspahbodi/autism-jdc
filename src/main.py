@@ -264,7 +264,7 @@ Examples:
     parser.add_argument(
         "--model",
         type=str,
-        choices=["llama3", "mistral"],
+        choices=["llama3_meta", "llama3_unslosh", "mistral"],
         default="mistral",
         help="Base model to use (default: llama3)",
     )
@@ -323,8 +323,10 @@ Examples:
     from src.config import ModelType
 
     config = SystemConfig(
-        model_type=ModelType.LLAMA3_8B
-        if args.model == "llama3"
+        model_type=ModelType.LLAMA3_8B_META
+        if args.model == "llama3_meta"
+        else ModelType.LLAMA3_8B_UNSLOSH
+        if args.model == "llama3_unslosh"
         else ModelType.MISTRAL_7B,
         output_dir=Path(args.output_dir),
         data_dir=Path(args.data_dir),
