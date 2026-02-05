@@ -147,49 +147,22 @@ class LoRAAdapter(LLMTrainer):
         self.peft_model.print_trainable_parameters()
 
     def _format_examples_for_training(self, examples: list[LabeledExample]) -> Dataset:
-        # (Same logic as before, ensuring text field is created)
+        """
+        Formats examples into a dataset with a 'messages' column.
+        SFTTrainer with completion_only_loss=True will automatically handle
+        chat templating and masking for the assistant's turn.
+        """
         data_list = []
         for example in examples:
             if example.input_prompt is not None and example.model_output is not None:
+                # Structure as standard chat messages
                 messages = [
                     {"role": "user", "content": example.input_prompt},
                     {"role": "assistant", "content": example.model_output},
                 ]
-                full_text = self.tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=False
-                )
-                data_list.append({"text": full_text})
+                data_list.append({"messages": messages})
+
         return Dataset.from_list(data_list)
-
-    def _derive_response_template(self) -> str:
-        """
-        Dynamically derive the response template for loss masking.
-        Refactored from _prepare_data_collator to return the string template.
-        """
-        messages = [{"role": "user", "content": "DETECT_RESPONSE_TEMPLATE"}]
-        prompt_no_gen = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=False
-        )
-        prompt_with_gen = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-
-        response_template = ""
-        if prompt_with_gen.startswith(prompt_no_gen):
-            response_template = prompt_with_gen[len(prompt_no_gen) :]
-
-        if not response_template.strip():
-            if (
-                self.config.model_type == ModelType.LLAMA3_8B
-                or "llama-3" in self.config.model_type.value.lower()
-            ):
-                response_template = "<|start_header_id|>assistant<|end_header_id|>"
-            elif "[/INST]" in prompt_no_gen:
-                response_template = "[/INST]"
-            else:
-                response_template = "### Response:\n"
-
-        return response_template
 
     def train(
         self,
@@ -203,10 +176,7 @@ class LoRAAdapter(LLMTrainer):
             if validation_examples:
                 eval_dataset = self._format_examples_for_training(validation_examples)
 
-            # Derive the template string instead of creating a collator object
-            response_template = self._derive_response_template()
-
-            # Use SFTConfig instead of TrainingArguments
+            # SFTConfig setup for newer TRL versions
             training_args = SFTConfig(
                 output_dir=str(self.config.output_dir / "checkpoints"),
                 num_train_epochs=self.config.training_hyperparameters.num_epochs,
@@ -223,11 +193,9 @@ class LoRAAdapter(LLMTrainer):
                 save_total_limit=3,
                 report_to="none",
                 remove_unused_columns=False,
-                dataset_text_field="text",
                 max_length=self.config.training_hyperparameters.max_seq_length,
-                # NEW Completion Logic:
-                completion_only_loss=True,
-                response_template=response_template,
+                dataset_text_field="messages",  # Tell trainer to look for 'messages' column
+                completion_only_loss=True,  # Automatically mask user prompts
             )
 
             trainer = SFTTrainer(
@@ -235,9 +203,8 @@ class LoRAAdapter(LLMTrainer):
                 train_dataset=train_dataset,
                 eval_dataset=eval_dataset,
                 args=training_args,
-                # Note: SFTTrainer handles the collator internally when
-                # completion_only_loss and response_template are in args.
                 tokenizer=self.tokenizer,
+                # No data_collator needed; SFTTrainer handles messages format automatically
             )
 
             trainer.train()
