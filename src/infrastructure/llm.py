@@ -109,7 +109,7 @@ class LoRAAdapter(LLMTrainer):
             trust_remote_code=True,
             cache_dir=str(self.config.cache_dir),
             token=self.config.hf_token,
-            torch_dtype=torch.float16,
+            dtype=torch.float16,
         )
 
         self.tokenizer = AutoTokenizer.from_pretrained(
