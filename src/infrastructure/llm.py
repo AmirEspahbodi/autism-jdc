@@ -102,6 +102,8 @@ class LoRAAdapter(LLMTrainer):
         else:
             bnb_config = None
 
+        # FIX: Explicitly pass torch_dtype=torch.float16 to override model default (BF16)
+        # This prevents "not implemented for 'BFloat16'" errors on T4 GPUs.
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_type.value,
             quantization_config=bnb_config,
@@ -109,7 +111,7 @@ class LoRAAdapter(LLMTrainer):
             trust_remote_code=True,
             cache_dir=str(self.config.cache_dir),
             token=self.config.hf_token,
-            dtype=torch.float16,
+            torch_dtype=torch.float16,
         )
 
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -121,6 +123,7 @@ class LoRAAdapter(LLMTrainer):
 
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
+        # ADD THIS LINE:
         self.model.config.pad_token_id = self.tokenizer.pad_token_id
 
         self.tokenizer.padding_side = "right"
@@ -279,6 +282,7 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
             self.tokenizer.padding_side = "left"
 
             # 3. Load Base Model
+            # FIX: Explicitly pass torch_dtype=torch.float16 to ensure T4 compatibility
             base_model = AutoModelForCausalLM.from_pretrained(
                 self.config.model_type.value,
                 quantization_config=bnb_config,
@@ -286,6 +290,7 @@ class HuggingFaceInferenceAdapter(InferenceEngine):
                 trust_remote_code=True,
                 cache_dir=str(self.config.cache_dir),
                 token=self.config.hf_token,
+                torch_dtype=torch.float16,
             )
 
             # 4. Load LoRA Adapter
