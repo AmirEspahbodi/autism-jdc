@@ -278,7 +278,6 @@ class LoRAAdapter(LLMTrainer):
             report_to="none",
             remove_unused_columns=False,
             max_length=self.config.training_hyperparameters.max_seq_length,
-            dataset_text_field="text",
         )
 
         def formatting_prompts_func(examples):
