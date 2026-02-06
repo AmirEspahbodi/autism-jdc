@@ -301,8 +301,8 @@ class LoRAAdapter(LLMTrainer):
             dataset_text_field="messages",
         )
 
-    # Run training
-    trainer.train()
+        # Run training
+        trainer.train()
 
     def save_model(self, output_path: str) -> None:
         if self.peft_model is None:
