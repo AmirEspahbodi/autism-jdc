@@ -252,51 +252,43 @@ class LoRAAdapter(LLMTrainer):
         training_examples: list[LabeledExample],
         validation_examples: Optional[list[LabeledExample]] = None,
     ) -> None:
-        try:
-            self._prepare_peft_model()
-            train_dataset = self._format_examples_for_training(training_examples)
-            eval_dataset = None
-            if validation_examples:
-                eval_dataset = self._format_examples_for_training(validation_examples)
+        self._prepare_peft_model()
+        train_dataset = self._format_examples_for_training(training_examples)
+        eval_dataset = None
+        if validation_examples:
+            eval_dataset = self._format_examples_for_training(validation_examples)
 
-            # SFTConfig setup
-            # Explicitly disable bf16 to ensure Trainer uses fp16 on T4
-            training_args = SFTConfig(
-                output_dir=str(self.config.output_dir / "checkpoints"),
-                num_train_epochs=self.config.training_hyperparameters.num_epochs,
-                per_device_train_batch_size=self.config.training_hyperparameters.batch_size,
-                gradient_accumulation_steps=self.config.training_hyperparameters.gradient_accumulation_steps,
-                learning_rate=self.config.training_hyperparameters.learning_rate,
-                fp16=self.config.training_hyperparameters.fp16,
-                bf16=False,  # Explicitly disable BF16 for T4 compatibility
-                logging_steps=self.config.training_hyperparameters.logging_steps,
-                save_steps=self.config.training_hyperparameters.save_steps,
-                eval_strategy="steps" if eval_dataset else "no",
-                save_strategy="steps",
-                warmup_ratio=self.config.training_hyperparameters.warmup_ratio,
-                optim=self.config.training_hyperparameters.optim,
-                save_total_limit=3,
-                report_to="none",
-                remove_unused_columns=False,
-                max_length=self.config.training_hyperparameters.max_seq_length,
-                dataset_text_field="messages",  # Tell trainer to look for 'messages' column
-                completion_only_loss=True,  # Automatically mask user prompts
-            )
+        training_args = SFTConfig(
+            output_dir=str(self.config.output_dir / "checkpoints"),
+            num_train_epochs=self.config.training_hyperparameters.num_epochs,
+            per_device_train_batch_size=self.config.training_hyperparameters.batch_size,
+            gradient_accumulation_steps=self.config.training_hyperparameters.gradient_accumulation_steps,
+            learning_rate=self.config.training_hyperparameters.learning_rate,
+            fp16=self.config.training_hyperparameters.fp16,
+            bf16=False,  # Explicitly disable BF16 for T4 compatibility
+            logging_steps=self.config.training_hyperparameters.logging_steps,
+            save_steps=self.config.training_hyperparameters.save_steps,
+            eval_strategy="steps" if eval_dataset else "no",
+            save_strategy="steps",
+            warmup_ratio=self.config.training_hyperparameters.warmup_ratio,
+            optim=self.config.training_hyperparameters.optim,
+            save_total_limit=3,
+            report_to="none",
+            remove_unused_columns=False,
+            max_length=self.config.training_hyperparameters.max_seq_length,
+            dataset_text_field="messages",  # Tell trainer to look for 'messages' column
+            completion_only_loss=True,  # Automatically mask user prompts
+        )
 
-            # NOTE: When using Unsloth, self.peft_model is the FastLanguageModel
-            # which works natively with SFTTrainer.
-            trainer = SFTTrainer(
-                model=self.peft_model,
-                train_dataset=train_dataset,
-                eval_dataset=eval_dataset,
-                args=training_args,
-                processing_class=self.tokenizer,
-            )
+        trainer = SFTTrainer(
+            model=self.peft_model,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            args=training_args,
+            processing_class=self.tokenizer,
+        )
 
-            trainer.train()
-
-        except Exception as e:
-            raise TrainingError(f"Training failed: {str(e)}") from e
+        trainer.train()
 
     def save_model(self, output_path: str) -> None:
         if self.peft_model is None:
