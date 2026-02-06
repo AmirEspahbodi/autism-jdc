@@ -254,12 +254,19 @@ class LoRAAdapter(LLMTrainer):
         training_examples: list[LabeledExample],
         validation_examples: Optional[list[LabeledExample]] = None,
     ) -> None:
+        """Fine-tune the model on labeled examples.
+
+        Fixed version that properly handles SFTTrainer with chat templates.
+        """
         self._prepare_peft_model()
+
+        # Format datasets with messages column
         train_dataset = self._format_examples_for_training(training_examples)
         eval_dataset = None
         if validation_examples:
             eval_dataset = self._format_examples_for_training(validation_examples)
 
+        # Configure training arguments
         training_args = SFTConfig(
             output_dir=str(self.config.output_dir / "checkpoints"),
             num_train_epochs=self.config.training_hyperparameters.num_epochs,
@@ -276,30 +283,26 @@ class LoRAAdapter(LLMTrainer):
             optim=self.config.training_hyperparameters.optim,
             save_total_limit=3,
             report_to="none",
-            remove_unused_columns=False,
+            # FIXED: Use max_seq_length instead of max_length
             max_length=self.config.training_hyperparameters.max_seq_length,
+            # FIXED: Don't remove columns - we need "messages"
+            remove_unused_columns=False,
+            # FIXED: Enable packing for better efficiency (optional but recommended)
+            packing=False,
         )
 
-        def formatting_prompts_func(examples):
-            convos = examples["messages"]
-            texts = [
-                self.tokenizer.apply_chat_template(
-                    convo, tokenize=False, add_generation_prompt=False
-                )
-                for convo in convos
-            ]
-            return texts
-
+        # FIXED: Let SFTTrainer handle chat template formatting automatically
         trainer = SFTTrainer(
             model=self.peft_model,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             args=training_args,
-            processing_class=self.tokenizer,
-            formatting_func=formatting_prompts_func,  # <--- Added this argument
+            tokenizer=self.tokenizer,
+            dataset_text_field="messages",
         )
 
-        trainer.train()
+    # Run training
+    trainer.train()
 
     def save_model(self, output_path: str) -> None:
         if self.peft_model is None:
