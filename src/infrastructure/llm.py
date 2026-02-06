@@ -247,8 +247,6 @@ class LoRAAdapter(LLMTrainer):
 
         return Dataset.from_list(data_list)
 
-    # In src/infrastructure/llm.py
-
     def train(
         self,
         training_examples: list[LabeledExample],
@@ -256,7 +254,7 @@ class LoRAAdapter(LLMTrainer):
     ) -> None:
         """Fine-tune the model on labeled examples.
 
-        Fixed version that properly handles SFTTrainer with chat templates.
+        Unsloth-compatible version with proper formatting function.
         """
         self._prepare_peft_model()
 
@@ -283,22 +281,38 @@ class LoRAAdapter(LLMTrainer):
             optim=self.config.training_hyperparameters.optim,
             save_total_limit=3,
             report_to="none",
-            # FIXED: Use max_seq_length instead of max_length
-            max_length=self.config.training_hyperparameters.max_seq_length,
-            # FIXED: Don't remove columns - we need "messages"
+            max_seq_length=self.config.training_hyperparameters.max_seq_length,
             remove_unused_columns=False,
-            # FIXED: Enable packing for better efficiency (optional but recommended)
             packing=False,
         )
 
-        # FIXED: Let SFTTrainer handle chat template formatting automatically
+        # FIXED: Formatting function that returns correct format for Unsloth
+        def formatting_prompts_func(examples):
+            """Format chat messages into text using tokenizer's chat template.
+
+            Args:
+                examples: Batch dictionary with "messages" key
+
+            Returns:
+                Dictionary with "text" key containing formatted strings
+            """
+            texts = [
+                self.tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=False
+                )
+                for messages in examples["messages"]
+            ]
+            return {"text": texts}  # CRITICAL: Return dict, not list!
+
+        # Create trainer with formatting function (required by Unsloth)
         trainer = SFTTrainer(
             model=self.peft_model,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             args=training_args,
             tokenizer=self.tokenizer,
-            dataset_text_field="messages",
+            formatting_func=formatting_prompts_func,  # Required by Unsloth
+            # Do NOT use dataset_text_field when using formatting_func
         )
 
         # Run training
