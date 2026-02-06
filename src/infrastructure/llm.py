@@ -3,6 +3,16 @@ from pathlib import Path
 from typing import Any, Optional
 
 import torch
+
+# --- CRITICAL FIX: UNSLOTH MUST BE IMPORTED BEFORE TRANSFORMERS/PEFT/TRL ---
+try:
+    from unsloth import FastLanguageModel
+
+    UNSLOTH_AVAILABLE = True
+except ImportError:
+    UNSLOTH_AVAILABLE = False
+# ---------------------------------------------------------------------------
+
 from datasets import Dataset
 from peft import (
     LoraConfig,
@@ -18,15 +28,6 @@ from transformers import (
     TrainingArguments,
 )
 from trl import SFTConfig, SFTTrainer
-
-# Try importing Unsloth gracefully
-try:
-    from unsloth import FastLanguageModel
-
-    UNSLOTH_AVAILABLE = True
-except ImportError:
-    UNSLOTH_AVAILABLE = False
-    # Define a dummy class for type hinting if needed, or just rely on the boolean check
 
 from src.config import ModelType, SystemConfig
 from src.domain import (
