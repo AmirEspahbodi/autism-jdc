@@ -247,6 +247,8 @@ class LoRAAdapter(LLMTrainer):
 
         return Dataset.from_list(data_list)
 
+    # In src/infrastructure/llm.py
+
     def train(
         self,
         training_examples: list[LabeledExample],
@@ -278,12 +280,23 @@ class LoRAAdapter(LLMTrainer):
             max_length=self.config.training_hyperparameters.max_seq_length,
         )
 
+        def formatting_prompts_func(examples):
+            convos = examples["messages"]
+            texts = [
+                self.tokenizer.apply_chat_template(
+                    convo, tokenize=False, add_generation_prompt=False
+                )
+                for convo in convos
+            ]
+            return texts
+
         trainer = SFTTrainer(
             model=self.peft_model,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             args=training_args,
             processing_class=self.tokenizer,
+            formatting_func=formatting_prompts_func,  # <--- Added this argument
         )
 
         trainer.train()
