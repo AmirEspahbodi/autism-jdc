@@ -265,7 +265,7 @@ class LoRAAdapter(LLMTrainer):
             gradient_accumulation_steps=self.config.training_hyperparameters.gradient_accumulation_steps,
             learning_rate=self.config.training_hyperparameters.learning_rate,
             fp16=self.config.training_hyperparameters.fp16,
-            bf16=False,  # Explicitly disable BF16 for T4 compatibility
+            bf16=False,
             logging_steps=self.config.training_hyperparameters.logging_steps,
             save_steps=self.config.training_hyperparameters.save_steps,
             eval_strategy="steps" if eval_dataset else "no",
@@ -276,8 +276,6 @@ class LoRAAdapter(LLMTrainer):
             report_to="none",
             remove_unused_columns=False,
             max_length=self.config.training_hyperparameters.max_seq_length,
-            dataset_text_field="messages",  # Tell trainer to look for 'messages' column
-            completion_only_loss=True,  # Automatically mask user prompts
         )
 
         trainer = SFTTrainer(
