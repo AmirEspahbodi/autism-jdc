@@ -19,6 +19,15 @@ from transformers import (
 )
 from trl import SFTConfig, SFTTrainer
 
+# Try importing Unsloth gracefully
+try:
+    from unsloth import FastLanguageModel
+
+    UNSLOTH_AVAILABLE = True
+except ImportError:
+    UNSLOTH_AVAILABLE = False
+    # Define a dummy class for type hinting if needed, or just rely on the boolean check
+
 from src.config import ModelType, SystemConfig
 from src.domain import (
     InferenceEngine,
@@ -75,17 +84,64 @@ class PromptTemplate:
 
 
 class LoRAAdapter(LLMTrainer):
-    """Adapter for fine-tuning LLMs using LoRA."""
+    """Adapter for fine-tuning LLMs using LoRA.
+
+    Refactored to support Unsloth's FastLanguageModel for optimized 4-bit QLoRA
+    while maintaining standard HuggingFace support for other models.
+    """
 
     def __init__(self, config: SystemConfig) -> None:
         self.config = config
-        self.model: Optional[AutoModelForCausalLM] = None
+        self.model: Any = None  # Union[AutoModelForCausalLM, FastLanguageModel]
         self.tokenizer: Optional[AutoTokenizer] = None
-        self.peft_model: Optional[PeftModel] = None
+        self.peft_model: Any = None
         self._initialize_model()
+
+    def _is_unsloth_model(self) -> bool:
+        """Check if the configured model is an Unsloth variant."""
+        return "unsloth" in self.config.model_type.value.lower() or (
+            hasattr(self.config.model_type, "name")
+            and "unsloth" in self.config.model_type.name.lower()
+        )
 
     def _initialize_model(self) -> None:
         print(f"Loading base model: {self.config.model_type.value}")
+
+        # --- PATH A: UNSLOTH OPTIMIZED LOADING ---
+        if self._is_unsloth_model():
+            if not UNSLOTH_AVAILABLE:
+                raise ImportError(
+                    "ModelType requires 'unsloth' library, but it is not installed."
+                )
+
+            print("⚡ Using Unsloth FastLanguageModel optimization")
+
+            self.model, self.tokenizer = FastLanguageModel.from_pretrained(
+                model_name=self.config.model_type.value,
+                max_seq_length=self.config.training_hyperparameters.max_seq_length,
+                dtype=None,  # Auto-detection (float16/bfloat16)
+                load_in_4bit=True,  # Force 4-bit for QLoRA
+                token=self.config.hf_token,
+                # device_map="auto" is handled internally by Unsloth usually,
+                # but explicit passing is sometimes deprecated in their API.
+                # We rely on their defaults.
+            )
+
+            # Ensure tokenizer hygiene consistent with our pipeline expectations
+            # Unsloth usually sets this up, but we enforce specific needs
+            if (
+                hasattr(self.tokenizer, "pad_token")
+                and self.tokenizer.pad_token is None
+            ):
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+
+            # Disable manual BOS if the attribute exists (Unsloth tokenizers might differ)
+            if hasattr(self.tokenizer, "add_bos_token"):
+                self.tokenizer.add_bos_token = False
+
+            return
+
+        # --- PATH B: STANDARD HUGGING FACE / BITSANDBYTES ---
 
         if self.config.quantization_config.quantization_type.value != "none":
             bnb_config = BitsAndBytesConfig(
@@ -103,7 +159,6 @@ class LoRAAdapter(LLMTrainer):
             bnb_config = None
 
         # Mistral v0.3 defaults to bfloat16 in config.json.
-        # We load with torch_dtype=torch.float16, but we must also override the config below.
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_type.value,
             quantization_config=bnb_config,
@@ -115,8 +170,6 @@ class LoRAAdapter(LLMTrainer):
         )
 
         # --- CRITICAL FIX FOR T4 GPU / MISTRAL v0.3 ---
-        # The model config still thinks it is bfloat16, which tricks PEFT into
-        # initializing adapters in bfloat16, causing T4 crashes.
         self.model.config.torch_dtype = torch.float16
         self.model.config.use_cache = False
         self.model.config.pretraining_tp = 1
@@ -133,11 +186,32 @@ class LoRAAdapter(LLMTrainer):
         self.model.config.pad_token_id = self.tokenizer.pad_token_id
         self.tokenizer.padding_side = "right"
 
-        # 4. Disable manual BOS addition; let apply_chat_template handle it
         if hasattr(self.tokenizer, "add_bos_token"):
             self.tokenizer.add_bos_token = False
 
     def _prepare_peft_model(self) -> None:
+        """Applies LoRA adapters to the model."""
+
+        # --- PATH A: UNSLOTH ADAPTERS ---
+        if self._is_unsloth_model():
+            print("⚡ Attaching Unsloth LoRA adapters...")
+            self.model = FastLanguageModel.get_peft_model(
+                self.model,
+                r=self.config.lora_config.r,
+                target_modules=self.config.lora_config.target_modules,
+                lora_alpha=self.config.lora_config.lora_alpha,
+                lora_dropout=self.config.lora_config.lora_dropout,
+                bias=self.config.lora_config.bias,
+                # Optimization specific to Unsloth
+                use_gradient_checkpointing="unsloth",
+                random_state=self.config.seed,
+            )
+            # Unsloth returns the model directly ready for training
+            self.peft_model = self.model
+            return
+
+        # --- PATH B: STANDARD PEFT ---
+        print("Standard PEFT: Preparing model for k-bit training...")
         self.model = prepare_model_for_kbit_training(self.model)
         self.model.gradient_checkpointing_enable()
 
@@ -208,6 +282,8 @@ class LoRAAdapter(LLMTrainer):
                 completion_only_loss=True,  # Automatically mask user prompts
             )
 
+            # NOTE: When using Unsloth, self.peft_model is the FastLanguageModel
+            # which works natively with SFTTrainer.
             trainer = SFTTrainer(
                 model=self.peft_model,
                 train_dataset=train_dataset,
@@ -226,6 +302,8 @@ class LoRAAdapter(LLMTrainer):
             raise IOError("No trained model to save")
         output_dir = Path(output_path)
         output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Unsloth models support save_pretrained exactly like PEFT/Transformers
         self.peft_model.save_pretrained(str(output_dir))
         self.tokenizer.save_pretrained(str(output_dir))
 
