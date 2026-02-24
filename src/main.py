@@ -1,9 +1,18 @@
-"""
-Main entry point for the JDC system.
+# CRITICAL: unsloth must be imported before transformers (or any library that
+# triggers a transformers import) so that all kernel patches are applied.
+# Do NOT move this import below any other ML library import.
+from __future__ import annotations
 
-This module demonstrates Clean Architecture principles through dependency
-injection, wiring together domain entities, application use cases, and
-infrastructure adapters.
+import unsloth
+
+"""CLI entry point for the JDC project.
+
+Commands:
+    train    — Run supervised fine-tuning.
+    evaluate — Run inference + metric computation on validation and/or test splits.
+    infer    — Run single-sample inference from a prompt file or stdin.
+
+CUDA availability is asserted before any other operation.
 """
 
 import argparse
@@ -11,344 +20,212 @@ import sys
 from pathlib import Path
 
 import torch
-from huggingface_hub import login
+from loguru import logger
 
-from src.application import EvaluateModelUseCase, FineTuneModelUseCase
-from src.config import KnowledgeBaseConfig, SystemConfig
-
-# Updated imports to include real data loaders
-from src.infrastructure import (
-    ConsoleReportGenerator,
-    DetailedReportGenerator,
-    HuggingFaceInferenceAdapter,
-    LenientJSONParser,
-    LoRAAdapter,
-    StandardMetricsRepository,
+from src.container import Container
+from src.domain.exceptions import (
+    ConfigurationError,
+    CUDANotAvailableError,
+    JDCException,
 )
 
-# Importing directly from module to ensure access to PreformattedDataLoader
-from src.infrastructure.data_loader import PreformattedDataLoader
 
+def _assert_cuda() -> None:
+    """Assert CUDA is available; raise CUDANotAvailableError if not.
 
-def check_gpu() -> None:
-    """Check GPU availability and print info."""
-    if torch.cuda.is_available():
-        print(f"✓ GPU Available: {torch.cuda.get_device_name(0)}")
-        print(f"  CUDA Version: {torch.version.cuda}")
-        print(
-            f"  GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB"
+    Raises:
+        CUDANotAvailableError: If no CUDA-capable GPU is detected.
+    """
+    if not torch.cuda.is_available():
+        raise CUDANotAvailableError(
+            "No CUDA device found. JDC requires an NVIDIA GPU with CUDA 12.6+. "
+            f"torch version: {torch.__version__}. "
+            "Set CUDA_VISIBLE_DEVICES appropriately and retry."
         )
+    logger.info(f"CUDA OK. Device: {torch.cuda.get_device_name(0)}")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the top-level argparse parser with subcommands.
+
+    Returns:
+        Configured ArgumentParser.
+    """
+    parser = argparse.ArgumentParser(
+        prog="jdc",
+        description=(
+            "Justification-Driven Classification (JDC) — Training, Evaluation, and Inference CLI"
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Path to config.yaml (default: config/config.yaml)",
+    )
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # --- train subcommand ---
+    subparsers.add_parser(
+        "train",
+        help="Fine-tune the model on the training split.",
+    )
+
+    # --- evaluate subcommand ---
+    eval_parser = subparsers.add_parser(
+        "evaluate",
+        help="Run inference and compute metrics on validation/test splits.",
+    )
+    eval_parser.add_argument(
+        "--splits",
+        nargs="+",
+        default=["validation", "test"],
+        choices=["validation", "test"],
+        help="Which splits to evaluate (default: both validation and test).",
+    )
+
+    # --- infer subcommand ---
+    infer_parser = subparsers.add_parser(
+        "infer",
+        help="Run single-sample inference on a prompt.",
+    )
+    infer_input = infer_parser.add_mutually_exclusive_group(required=True)
+    infer_input.add_argument(
+        "--prompt-file",
+        type=Path,
+        help="Path to a text file containing the input_prompt.",
+    )
+    infer_input.add_argument(
+        "--prompt",
+        type=str,
+        help="The input_prompt string directly on the command line.",
+    )
+
+    return parser
+
+
+def _cmd_train(container: Container) -> None:
+    """Execute the training use case.
+
+    Args:
+        container: Wired DI container.
+    """
+    logger.info("Command: TRAIN")
+    use_case = container.get_train_use_case()
+    use_case.execute()
+    logger.info("Training pipeline completed successfully.")
+
+
+def _cmd_evaluate(container: Container, splits: list[str]) -> None:
+    """Execute the evaluation use case.
+
+    Args:
+        container: Wired DI container.
+        splits: List of split names to evaluate.
+    """
+    logger.info(f"Command: EVALUATE — splits={splits}")
+    use_case = container.get_evaluate_use_case()
+    results = use_case.execute(splits=splits)
+    for split, result in results.items():
+        print(f"\n{'=' * 60}")
+        print(f"SPLIT: {split.upper()}")
+        print(f"  F1           : {result.f1:.4f}")
+        print(f"  Precision    : {result.precision:.4f}")
+        print(f"  Recall       : {result.recall:.4f}")
+        print(f"  Accuracy     : {result.accuracy:.4f}")
+        print(f"  PrincipleAcc : {result.principle_accuracy:.4f}")
+        print(f"{'=' * 60}\n")
+    logger.info("Evaluation pipeline completed successfully.")
+
+
+def _cmd_infer(
+    container: Container,
+    prompt_file: Path | None,
+    prompt: str | None,
+) -> None:
+    """Execute single-sample inference.
+
+    Args:
+        container: Wired DI container.
+        prompt_file: Optional path to a file containing the prompt.
+        prompt: Optional inline prompt string.
+    """
+    logger.info("Command: INFER")
+
+    if prompt_file is not None:
+        if not prompt_file.exists():
+            logger.error(f"Prompt file not found: {prompt_file}")
+            sys.exit(1)
+        input_prompt = prompt_file.read_text(encoding="utf-8").strip()
+    elif prompt is not None:
+        input_prompt = prompt.strip()
     else:
-        print("⚠ Warning: No GPU detected. Training will be slow.")
-        print("  Consider using Google Colab or a GPU-enabled environment.")
-
-
-def get_training_data_loader(config: SystemConfig):
-    """Factory to select the appropriate training data loader."""
-    # Strict Policy: Only SFT Pre-formatted dataset (dataset.json) is allowed.
-    # Unsafe fallbacks to legacy loaders have been removed to prevent runtime instability.
-    sft_path = config.data_dir / "_train_dataset.json"
-
-    if not sft_path.exists():
-        print(f"✗ Critical: dataset.json not found at {sft_path}")
-        print("  The system strictly requires the SFT dataset. Aborting.")
+        logger.error("No prompt provided.")
         sys.exit(1)
 
-    print(f"✓ Found SFT dataset at: {sft_path}")
-    return PreformattedDataLoader(train_path=sft_path)
+    use_case = container.get_inference_use_case()
+    result = use_case.execute(input_prompt)
 
-
-def get_evaluation_data_loader(config: SystemConfig):
-    """Factory to select the appropriate evaluation data loader."""
-    # Strict Policy: Only SFT Pre-formatted test dataset (test_dataset.json) is allowed.
-    sft_test_path = config.data_dir / "_test_dataset.json"
-
-    if not sft_test_path.exists():
-        print(f"✗ Critical: test_dataset.json not found at {sft_test_path}")
-        print("  The system strictly requires the SFT test dataset. Aborting.")
-        sys.exit(1)
-
-    print(f"✓ Found SFT test dataset at: {sft_test_path}")
-    # We inject the found path as 'test_path'.
-    return PreformattedDataLoader(test_path=sft_test_path)
-
-
-def run_fine_tuning(config: SystemConfig) -> None:
-    """Execute the fine-tuning pipeline.
-
-    Args:
-        config: System configuration.
-    """
-    import gc  # Required for memory cleanup
-
-    print("\n" + "=" * 70)
-    print("INITIALIZING FINE-TUNING PIPELINE")
-    print("=" * 70)
-
-    # Create output directory
-    config.output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Dependency Injection: Wire up the adapters
-    print("\n[Dependency Injection] Wiring adapters...")
-
-    # Infrastructure Layer: Concrete implementations
-    trainer = LoRAAdapter(config)
-
-    data_loader = get_training_data_loader(config)
-
-    print(f"✓ Adapters initialized (Loader: {data_loader.__class__.__name__})")
-
-    # Application Layer: Use case
-    fine_tune_use_case = FineTuneModelUseCase(
-        trainer=trainer,
-        data_loader=data_loader,
-        config=config,
-    )
-
-    result = False
-
-    # Execute
-    try:
-        # Note: Validation is now safely handled by the loader internally
-        fine_tune_use_case.execute(use_validation=True)
-        print("\n✓ Fine-tuning completed successfully!")
-        result = True
-    except Exception as e:
-        print(f"\n✗ Fine-tuning failed: {str(e)}")
-        # import traceback
-        # traceback.print_exc()
-        result = False
-
-    # --- MANDATORY GPU CLEANUP BLOCK ---
-    print("\n[Cleanup] Releasing GPU resources to prevent OOM in next stage...")
-
-    # 1. Break references to the model
-    del fine_tune_use_case
-    del trainer
-
-    # 2. Force Python garbage collection
-    gc.collect()
-
-    # 3. Empty CUDA cache
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        print("✓ GPU memory cache cleared.")
-
-    return result
-
-
-def run_evaluation(config: SystemConfig) -> None:
-    """Execute the evaluation pipeline.
-
-    Args:
-        config: System configuration.
-    """
-    print("\n" + "=" * 70)
-    print("INITIALIZING EVALUATION PIPELINE")
-    print("=" * 70)
-
-    # Check if model exists
-    model_path = str(config.output_dir / "fine_tuned_model")
-    if not Path(model_path).exists():
-        print(f"\n✗ Error: Fine-tuned model not found at {model_path}")
-        print("  Please run fine-tuning first: python main.py --mode train")
-        return False
-
-    # Dependency Injection: Wire up the adapters
-    print("\n[Dependency Injection] Wiring adapters...")
-
-    # Infrastructure Layer: Concrete implementations
-    inference_engine = HuggingFaceInferenceAdapter(config, model_path)
-    parser = LenientJSONParser()  # Use lenient parser for robustness
-    metrics_repo = StandardMetricsRepository()
-    report_generator = DetailedReportGenerator()
-    console_reporter = ConsoleReportGenerator()
-    kb_config = KnowledgeBaseConfig()
-
-    data_loader = get_evaluation_data_loader(config)
-
-    print(f"✓ Adapters initialized (Loader: {data_loader.__class__.__name__})")
-
-    # Application Layer: Use case
-    evaluate_use_case = EvaluateModelUseCase(
-        inference_engine=inference_engine,
-        parser=parser,
-        metrics_repo=metrics_repo,
-        report_generator=report_generator,
-        data_loader=data_loader,
-        kb_config=kb_config,
-    )
-
-    # Execute
-    try:
-        output_base = str(config.output_dir / "evaluation")
-        metrics = evaluate_use_case.execute(output_base)
-
-        # Also print to console
-        console_reporter.generate_report([], metrics)
-
-        print("\n✓ Evaluation completed successfully!")
-        print(f"\n📊 Results saved to:")
-        print(f"   - Metrics: {output_base}_metrics.json")
-        print(f"   - Report:  {output_base}_report.json")
-        return True
-
-    except Exception as e:
-        print(f"\n✗ Evaluation failed: {str(e)}")
-        import traceback
-
-        traceback.print_exc()
-        return False
-
-
-def run_full_pipeline(config: SystemConfig) -> None:
-    """Run both fine-tuning and evaluation.
-
-    Args:
-        config: System configuration.
-    """
-    check_gpu()
-
-    # Stage 3: Fine-tuning
-    success = run_fine_tuning(config)
-    if not success:
-        print("\n✗ Pipeline aborted due to fine-tuning failure.")
-        return
-
-    # Stage 4: Evaluation
-    success = run_evaluation(config)
-    if not success:
-        print("\n✗ Pipeline aborted due to evaluation failure.")
-        return
-
-    print("\n" + "=" * 70)
-    print("✓ FULL PIPELINE COMPLETED SUCCESSFULLY!")
-    print("=" * 70)
+    print("\n=== INFERENCE RESULT ===")
+    print(f"  principle_id            : {result.principle_id}")
+    print(f"  principle_name          : {result.principle_name}")
+    print(f"  is_ableist (derived)    : {result.is_ableist}")
+    print(f"  evidence_quote          : {result.evidence_quote!r}")
+    print(f"  justification_reasoning : {result.justification_reasoning!r}")
+    print("========================\n")
 
 
 def main() -> None:
-    """Main entry point with CLI argument parsing."""
-    parser = argparse.ArgumentParser(
-        description="Neuro-Symbolic Justification-Driven Classification System",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Run full pipeline (training + evaluation)
-  python main.py --mode full
+    """Main CLI entry point.
 
-  # Only fine-tuning
-  python main.py --mode train
+    Parses arguments, validates CUDA, wires the container, and dispatches
+    to the appropriate command handler.
 
-  # Only evaluation (requires existing model)
-  python main.py --mode eval
-
-  # Use Mistral instead of Llama
-  python main.py --model mistral
-
-  # Custom output directory
-  python main.py --output-dir ./my_results
-
-  # Custom data directory (where dataset.json or train.json is located)
-  python main.py --data-dir ./my_data
-        """,
-    )
-
-    parser.add_argument(
-        "--mode",
-        type=str,
-        choices=["full", "train", "eval"],
-        default="full",
-        help="Pipeline mode: 'full' (train+eval), 'train' (only training), 'eval' (only evaluation)",
-    )
-
-    parser.add_argument(
-        "--model",
-        type=str,
-        choices=["llama3_meta", "llama3_unslosh", "mistral"],
-        default="mistral",
-        help="Base model to use (default: llama3)",
-    )
-
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="./outputs",
-        help="Output directory for models and results (default: ./outputs)",
-    )
-
-    # Added explicit data-dir argument support
-    parser.add_argument(
-        "--data-dir",
-        type=str,
-        default="./dataset",
-        help="Directory containing dataset.json, train.json, or test.json (default: ./data)",
-    )
-
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        default=3,
-        help="Number of training epochs (default: 3)",
-    )
-
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=4,
-        help="Training batch size (default: 4)",
-    )
-
-    parser.add_argument(
-        "--learning-rate",
-        type=float,
-        default=2e-4,
-        help="Learning rate (default: 2e-4)",
-    )
-    parser.add_argument(
-        "--hf-token",
-        type=str,
-        default=None,
-        help="Hugging Face API token (can also be set via HF_TOKEN env var)",
-    )
+    Raises:
+        SystemExit: On validation failure or unrecoverable error.
+    """
+    parser = _build_parser()
     args = parser.parse_args()
 
-    if args.hf_token:
-        print("✓ Authenticating with Hugging Face...")
-        login(token=args.hf_token)
-    else:
-        print(
-            "⚠ Warning: No Hugging Face token provided. Gated models (Llama 3) may fail."
-        )
+    # CUDA must be available before any model operations
+    try:
+        _assert_cuda()
+    except CUDANotAvailableError as exc:
+        logger.critical(str(exc))
+        sys.exit(1)
 
-    from src.config import ModelType
+    # Wire the DI container
+    try:
+        container = Container(config_path=args.config)
+        container.wire()
+    except ConfigurationError as exc:
+        logger.critical(f"Configuration error: {exc}")
+        sys.exit(1)
+    except JDCException as exc:
+        logger.critical(f"Startup error: {exc}")
+        sys.exit(1)
 
-    config = SystemConfig(
-        model_type=ModelType.LLAMA3_8B_META
-        if args.model == "llama3_meta"
-        else ModelType.LLAMA3_8B_UNSLOSH
-        if args.model == "llama3_unslosh"
-        else ModelType.MISTRAL_7B,
-        output_dir=Path(args.output_dir),
-        data_dir=Path(args.data_dir),
-        hf_token=args.hf_token,
-    )
-
-    # Override hyperparameters from CLI
-    config.training_hyperparameters.num_epochs = args.epochs
-    config.training_hyperparameters.batch_size = args.batch_size
-    config.training_hyperparameters.learning_rate = args.learning_rate
-
-    # Execute based on mode
-    if args.mode == "full":
-        run_full_pipeline(config)
-    elif args.mode == "train":
-        check_gpu()
-        run_fine_tuning(config)
-    elif args.mode == "eval":
-        check_gpu()
-        run_evaluation(config)
-    else:
-        parser.print_help()
+    # Dispatch command
+    try:
+        if args.command == "train":
+            _cmd_train(container)
+        elif args.command == "evaluate":
+            _cmd_evaluate(container, splits=args.splits)
+        elif args.command == "infer":
+            _cmd_infer(
+                container,
+                prompt_file=getattr(args, "prompt_file", None),
+                prompt=getattr(args, "prompt", None),
+            )
+        else:
+            parser.print_help()
+            sys.exit(1)
+    except JDCException as exc:
+        logger.critical(f"Fatal JDC error: {exc}")
+        sys.exit(1)
+    except Exception as exc:
+        logger.exception(f"Unexpected error: {exc}")
         sys.exit(1)
 
 

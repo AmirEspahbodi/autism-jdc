@@ -1,556 +1,238 @@
-# Neuro-Symbolic Justification-Driven Classification (JDC) System
+# Justification-Driven Classification (JDC)
 
-A production-grade machine learning system for neurodiversity-aware detection of ableist language using fine-tuned Large Language Models (LLMs) with symbolic knowledge grounding.
-
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.1.0-red.svg)](https://pytorch.org/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-
-## 📋 Table of Contents
-
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Features](#features)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Dataset Format](#dataset-format)
-- [Configuration](#configuration)
-- [Usage](#usage)
-- [Knowledge Base](#knowledge-base)
-- [Metrics & Evaluation](#metrics--evaluation)
-- [Advanced Topics](#advanced-topics)
-- [Project Structure](#project-structure)
-- [Contributing](#contributing)
+A production-ready Python project for fine-tuning **Llama 3 8B** (via Unsloth + QLoRA) on the task of **ableism detection in autism/disability Reddit discourse**, using a symbolic Knowledge Base to generate structured JSON justifications.
 
 ---
 
-## 🎯 Overview
+## Architecture
 
-The JDC system combines **symbolic AI** (knowledge-based principles) with **neural approaches** (fine-tuned LLMs) to detect and classify ableist language patterns in text. It generates structured, interpretable justifications grounded in neurodiversity principles.
+The project follows **Onion / Hexagonal Architecture** with strict layer separation:
 
-### Key Capabilities
-
-- **Binary Classification**: Detects whether text contains ableist language (classes: 0=Safe, 1=Ableist)
-- **Principle-Based Justification**: Maps detections to specific neurodiversity principles (P0-P4)
-- **Interpretable Output**: Generates structured JSON with evidence quotes and reasoning
-- **Production-Ready**: Built with Clean Architecture for maintainability and extensibility
-- **Resource-Efficient**: Uses LoRA fine-tuning with 4-bit quantization for consumer GPUs
-
-### Use Cases
-
-- Content moderation for neurodiversity-inclusive platforms
-- Assistive writing tools for inclusive language
-- Research on bias detection in NLP systems
-- Educational tools for neurodiversity awareness
-
----
-
-## 🏗️ Architecture
-
-The system follows **Clean Architecture** principles with strict layer separation:
 ```
-┌─────────────────────────────────────────────────────┐
-│                 Presentation Layer                   │
-│              (CLI - src/main.py)                    │
-└─────────────────────────────────────────────────────┘
-                        ▼
-┌─────────────────────────────────────────────────────┐
-│               Application Layer                      │
-│         (Use Cases - src/application/)              │
-│   • FineTuneModelUseCase                            │
-│   • EvaluateModelUseCase                            │
-└─────────────────────────────────────────────────────┘
-                        ▼
-┌─────────────────────────────────────────────────────┐
-│                 Domain Layer                         │
-│          (Business Logic - src/domain/)             │
-│   • Interfaces (Ports)                              │
-│   • Types (Entities & Value Objects)                │
-│   • Domain Exceptions                               │
-└─────────────────────────────────────────────────────┘
-                        ▲
-┌─────────────────────────────────────────────────────┐
-│              Infrastructure Layer                    │
-│         (Adapters - src/infrastructure/)            │
-│   • LoRAAdapter (Training)                          │
-│   • HuggingFaceInferenceAdapter                     │
-│   • PreformattedDataLoader                          │
-│   • RobustJSONParser                                │
-│   • StandardMetricsRepository                       │
-└─────────────────────────────────────────────────────┘
+Domain (innermost) → Application → Infrastructure (outermost)
 ```
 
-### Design Patterns
-
-- **Dependency Inversion**: Core logic depends on abstractions, not implementations
-- **Adapter Pattern**: External frameworks wrapped in domain-specific adapters
-- **Strategy Pattern**: Pluggable parsers (Lenient/Strict), data loaders
-- **Repository Pattern**: Metrics storage and retrieval abstraction
-
----
-
-## ✨ Features
-
-### Training Pipeline
-
-- ✅ **LoRA Fine-Tuning**: Parameter-efficient training using PEFT
-- ✅ **Quantization Support**: 4-bit/8-bit quantization via bitsandbytes
-- ✅ **Validation Splitting**: Deterministic train/val split with configurable ratio
-- ✅ **Chat Template Support**: Native Llama 3 and Mistral prompt formatting
-- ✅ **Gradient Checkpointing**: Memory-efficient training for large models
-- ✅ **Mixed Precision**: FP16 training for faster convergence
-
-### Inference & Evaluation
-
-- ✅ **Batch Generation**: Efficient batch inference with dynamic padding
-- ✅ **Robust JSON Parsing**: Handles markdown, malformed JSON, truncated outputs
-- ✅ **Comprehensive Metrics**: Precision, Recall, F1, Accuracy, Confusion Matrix
-- ✅ **Detailed Reporting**: JSON reports with per-example predictions and errors
-- ✅ **Error Recovery**: Lenient parsing with heuristic field extraction
-
-### Data Handling
-
-- ✅ **SFT Dataset Format**: Pre-formatted instruction-response pairs
-- ✅ **Validation Safety**: Separate validation split to prevent data leakage
-- ✅ **Flexible Loading**: Support for explicit val files or automatic splitting
-- ✅ **Polymorphic Examples**: Handles both SFT and legacy structured formats
+| Layer | Location | Responsibility |
+|---|---|---|
+| Domain | `src/domain/` | Entities, value objects, exceptions (zero external deps) |
+| Application | `src/application/` | Use cases and abstract ports (interfaces) |
+| Infrastructure | `src/infrastructure/` | Concrete adapters (Unsloth, sklearn, JSON files) |
+| Entry Point | `src/main.py` | CLI wiring |
 
 ---
 
-## 📦 Installation
+## Prerequisites
 
-### Requirements
+- **Python 3.10+**
+- **NVIDIA GPU** with **CUDA 12.6+** (no CPU fallback for training)
+- ~24 GB VRAM recommended (Llama 3 8B + QLoRA + bfloat16 activations)
 
-- Python 3.10+
-- CUDA-capable GPU (recommended: ≥16GB VRAM)
-- 32GB+ RAM (for 8B parameter models)
+---
 
-### Setup
+## Installation
+
 ```bash
-# Clone the repository
-git clone https://github.com/your-org/jdc-system.git
-cd jdc-system
+# 1. Clone / extract the project
+cd jdc_project
 
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+# 2. Create a virtual environment
+python -m venv .venv && source .venv/bin/activate
 
-# Install dependencies
+# 3. Install Unsloth first (version-sensitive CUDA build)
+pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+
+# 4. Install remaining dependencies
 pip install -r requirements.txt
-
-# Create necessary directories
-mkdir -p dataset outputs cache
-```
-
-### GPU Verification
-```bash
-python -c "import torch; print(f'CUDA Available: {torch.cuda.is_available()}')"
 ```
 
 ---
 
-## 🚀 Quick Start
+## Dataset
 
-### 1. Prepare Your Dataset
+Place your three JSON dataset files in the `./dataset/` directory:
 
-Create `dataset/dataset.json` with pre-formatted SFT examples:
-```json
-[
-  {
-    "input_prompt": "Classify the following sentence:\n\"People with autism are just broken versions of normal people.\"",
-    "model_output": "{\"principle_id\": \"P2\", \"justification_text\": \"The sentence uses dehumanizing language...\", \"evidence_quote\": \"broken versions of normal people\"}"
-  }
-]
+```
+dataset/
+├── train_dataset.json
+├── validation_dataset.json
+└── test_dataset.json
 ```
 
-See [Dataset Format](#dataset-format) for complete specification.
-
-### 2. Run Full Pipeline
-```bash
-# Train and evaluate in one command
-python src/main.py --mode full
-```
-
-### 3. Individual Stages
-```bash
-# Training only
-python src/main.py --mode train --epochs 3 --batch-size 4
-
-# Evaluation only (requires trained model)
-python src/main.py --mode eval
-```
-
-### 4. Model Selection
-```bash
-# Use Mistral instead of Llama 3
-python src/main.py --model mistral --mode full
-
-# Custom output directory
-python src/main.py --output-dir ./my_results
-```
-
----
-
-## 📊 Dataset Format
-
-The system expects datasets in **SFT (Supervised Fine-Tuning)** format with instruction-response pairs.
-
-### Training Dataset (`dataset/dataset.json`)
-```json
-[
-  {
-    "input_prompt": "Classify: \"Autistic people lack empathy.\"",
-    "model_output": "{\"principle_id\": \"P3\", \"justification_text\": \"This is a harmful stereotype...\", \"evidence_quote\": \"lack empathy\"}"
-  },
-  {
-    "input_prompt": "Classify: \"Neurodivergent individuals bring unique perspectives.\"",
-    "model_output": "{\"principle_id\": \"P0\", \"justification_text\": \"This is respectful language...\", \"evidence_quote\": \"unique perspectives\"}"
-  }
-]
-```
-
-### Test Dataset (`dataset/test_dataset.json`)
-
-Same format as training data. Used for final evaluation.
-
-### Validation Dataset (Optional: `dataset/val_dataset.json`)
-
-If provided, used directly. Otherwise, automatically created from training data with 10% split.
-
-### Expected JSON Schema (model_output)
+Each file must be a JSON array where each element has:
 ```json
 {
-  "principle_id": "P0|P1|P2|P3|P4",
-  "justification_text": "Explanation of classification",
-  "evidence_quote": "Quoted text supporting the decision"
+  "id":           "unique-string-id",
+  "input_prompt": "Full prompt including KB and context…",
+  "model_output": "{\"justification_reasoning\": \"…\", \"evidence_quote\": \"…\", \"principle_id\": \"P1\", \"principle_name\": \"Medical Model Framing\", \"is_ableist\": true}"
 }
 ```
 
-**Label Mapping**:
-- P0 → Safe (label: 0)
-- P1, P2, P3, P4 → Ableist (label: 1)
+---
+
+## Configuration
+
+Edit `config/config.yaml` to customise model, LoRA, training, and evaluation settings.
+
+Key parameters:
+
+| Key | Default | Description |
+|---|---|---|
+| `model.name` | `unsloth/Meta-Llama-3-8B-Instruct` | HuggingFace model ID |
+| `model.max_seq_length` | `2048` | Max tokens per sample |
+| `lora.r` | `16` | LoRA rank |
+| `training.num_train_epochs` | `3` | Training epochs |
+| `training.learning_rate` | `2e-4` | Learning rate |
+| `evaluation.checkpoint_path` | `./outputs/checkpoints/best_model` | Checkpoint for eval/inference |
 
 ---
 
-## ⚙️ Configuration
+## Usage
 
-### Command-Line Arguments
+All commands are run from the project root:
+
 ```bash
-python src/main.py \
-  --mode full|train|eval \
-  --model llama3|mistral \
-  --epochs 3 \
-  --batch-size 4 \
-  --learning-rate 2e-4 \
-  --output-dir ./outputs \
-  --data-dir ./dataset
-```
+# Training
+python -m src.main train
 
-### Programmatic Configuration
+# Evaluation (both validation and test splits)
+python -m src.main evaluate
 
-Edit `src/config.py` for fine-grained control:
-```python
-from src.config import SystemConfig, ModelType, LoRAConfig
+# Evaluation (single split)
+python -m src.main evaluate --splits validation
 
-config = SystemConfig(
-    model_type=ModelType.LLAMA3_8B_META,
-    lora_config=LoRAConfig(
-        r=16,                    # LoRA rank
-        lora_alpha=32,           # LoRA alpha
-        target_modules=[         # Modules to adapt
-            "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj"
-        ]
-    ),
-    training_hyperparameters=TrainingHyperparameters(
-        num_epochs=3,
-        batch_size=4,
-        learning_rate=2e-4,
-        max_seq_length=2048
-    )
-)
-```
+# Single-sample inference from a prompt file
+python -m src.main infer --prompt-file my_prompt.txt
 
-### Key Hyperparameters
+# Single-sample inference inline
+python -m src.main infer --prompt "Your full prompt string here…"
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `num_epochs` | 3 | Training epochs |
-| `batch_size` | 4 | Per-device batch size |
-| `learning_rate` | 2e-4 | Initial learning rate |
-| `lora_r` | 16 | LoRA rank (higher = more parameters) |
-| `lora_alpha` | 32 | LoRA scaling factor |
-| `max_seq_length` | 2048 | Maximum token length |
-| `quantization_type` | 4bit | Model quantization (4bit/8bit/none) |
-
----
-
-## 💻 Usage
-
-### Training
-```python
-from pathlib import Path
-from src.config import SystemConfig, ModelType
-from src.application import FineTuneModelUseCase
-from src.infrastructure import LoRAAdapter, PreformattedDataLoader
-
-# Configure system
-config = SystemConfig(
-    model_type=ModelType.LLAMA3_8B_META,
-    data_dir=Path("./dataset"),
-    output_dir=Path("./outputs")
-)
-
-# Initialize components
-trainer = LoRAAdapter(config)
-data_loader = PreformattedDataLoader(
-    train_path=config.data_dir / "dataset.json"
-)
-
-# Execute training
-use_case = FineTuneModelUseCase(trainer, data_loader, config)
-use_case.execute(use_validation=True)
-```
-
-### Inference
-```python
-from src.infrastructure import HuggingFaceInferenceAdapter
-
-# Load fine-tuned model
-model_path = "./outputs/fine_tuned_model"
-engine = HuggingFaceInferenceAdapter(config, model_path)
-
-# Generate prediction
-sentence = "Autistic people are inspirations."
-output = engine.generate_justification(sentence)
-print(output)  # JSON string with principle_id, justification, evidence
-```
-
-### Parsing Outputs
-```python
-from src.infrastructure import LenientJSONParser, ParsingError
-
-parser = LenientJSONParser()
-
-try:
-    justification = parser.parse(raw_model_output)
-    print(f"Principle: {justification.principle_id}")
-    print(f"Label: {justification.to_label()}")  # 0 or 1
-    print(f"Reasoning: {justification.justification_text}")
-except ParsingError as e:
-    print(f"Parsing failed: {e}")
+# Custom config path
+python -m src.main --config /path/to/my_config.yaml train
 ```
 
 ---
 
-## 📚 Knowledge Base
+## Output Files
 
-The system uses a symbolic knowledge base defining neurodiversity principles:
+All outputs land in `./outputs/`:
 
-### Principles
-
-| ID | Name | Classification | Description |
-|----|------|----------------|-------------|
-| **P0** | Neutral Language | Safe | Language respecting neurological diversity |
-| **P1** | Pathologizing Language | Ableist | Frames neurodivergence as deficits/diseases |
-| **P2** | Dehumanizing Metaphors | Ableist | Compares people to objects/machinery |
-| **P3** | Stereotyping | Ableist | Overgeneralized assumptions about abilities |
-| **P4** | Exclusionary Language | Ableist | Excludes neurodivergent people from society |
-
-### Example Classifications
-```python
-# P0 (Safe)
-"Neurodivergent individuals contribute unique perspectives to teams."
-
-# P1 (Ableist - Pathologizing)
-"ADHD is a disorder that needs to be cured."
-
-# P2 (Ableist - Dehumanizing)
-"They're like robots - no emotions."
-
-# P3 (Ableist - Stereotyping)
-"All autistic people are math geniuses."
-
-# P4 (Ableist - Exclusionary)
-"People with disabilities can't handle real jobs."
-```
-
----
-
-## 📈 Metrics & Evaluation
-
-### Computed Metrics
-
-- **Precision**: TP / (TP + FP)
-- **Recall**: TP / (TP + FN)
-- **F1 Score**: Harmonic mean of precision and recall
-- **Accuracy**: (TP + TN) / Total
-- **Confusion Matrix**: TP, FP, TN, FN counts
-- **Parsing Failure Rate**: % of unparseable outputs
-
-### Parsing Failure Handling
-
-**Critical**: Parsing failures are treated as **incorrect predictions** and penalize all metrics:
-
-- Assigned label: `-1` (system error)
-- Counted as False Negatives if ground truth = 1 (Ableist)
-- Penalizes Accuracy regardless of ground truth
-
-This ensures model reliability is measured, not just classification ability.
-
-### Output Files
 ```
 outputs/
-├── fine_tuned_model/          # Saved LoRA adapter + tokenizer
-├── checkpoints/               # Training checkpoints
-├── evaluation_metrics.json    # Numerical metrics
-└── evaluation_report.json     # Detailed per-example results
+├── checkpoints/           ← Saved LoRA adapter weights (per epoch + best)
+├── logs/
+│   └── run.log            ← Full loguru log file
+├── evaluation_validation_YYYYMMDD_HHMMSS.json
+├── evaluation_test_YYYYMMDD_HHMMSS.json
+├── disagreement_report_validation_YYYYMMDD_HHMMSS.json
+└── disagreement_report_test_YYYYMMDD_HHMMSS.json
 ```
 
-### Sample Metrics Output
+### Evaluation JSON Schema
+
 ```json
 {
-  "precision": 0.8750,
-  "recall": 0.9333,
-  "f1_score": 0.9032,
-  "accuracy": 0.8800,
-  "true_positives": 14,
-  "false_positives": 2,
-  "true_negatives": 8,
-  "false_negatives": 1,
-  "total_examples": 25,
-  "parsing_failures": 0
+  "split": "validation",
+  "f1": 0.9123,
+  "precision": 0.9200,
+  "recall": 0.9050,
+  "accuracy": 0.9180,
+  "principle_accuracy": 0.8750,
+  "confusion_matrix": [[120, 8], [10, 112]],
+  "classification_report": "…full sklearn report…"
+}
+```
+
+### Disagreement Report Schema
+
+```json
+{
+  "split": "validation",
+  "total_samples": 250,
+  "total_disagreements": 18,
+  "false_positives": 8,
+  "false_negatives": 10,
+  "principle_pair_frequency": {"P1 -> P0": 5, "P0 -> P3": 3},
+  "disagreements": [
+    {
+      "id": "sample-001",
+      "input_prompt": "…first 500 chars…",
+      "ground_truth_principle": "P1",
+      "ground_truth_label": true,
+      "predicted_principle": "P0",
+      "predicted_label": false,
+      "generated_justification": "…",
+      "generated_evidence": "…",
+      "error_type": "FALSE_NEGATIVE"
+    }
+  ]
 }
 ```
 
 ---
 
-## 🔬 Advanced Topics
+## Knowledge Base Principles
 
-### Custom Data Loaders
+| ID | Name | Description |
+|---|---|---|
+| P0 | Not Ableist | Neutral experience, community support, or reclaimed language |
+| P1 | Medical Model Framing | Defines autism as disease, tragedy, or deficit |
+| P2 | Eugenicist Hierarchy | Functioning labels or value based on societal utility |
+| P3 | Promotion of Harmful Tropes | Debunked stereotypes like vaccine-autism links |
+| P4 | Centering Neurotypical Perspectives | Frames through non-autistic inconvenience |
 
-Implement the `DataLoader` interface for custom formats:
-```python
-from src.domain import DataLoader, LabeledExample
+**Label derivation rule (hardcoded):**
+- `principle_id ∈ {P1, P2, P3, P4}` → `is_ableist = True`
+- `principle_id == P0` → `is_ableist = False`
 
-class CustomLoader(DataLoader):
-    def load_training_data(self) -> list[LabeledExample]:
-        # Your loading logic
-        return examples
-    
-    def load_validation_data(self) -> list[LabeledExample]:
-        # Validation split logic
-        return val_examples
-    
-    def load_test_data(self) -> list[LabeledExample]:
-        # Test data loading
-        return test_examples
-```
-
-### Strict vs. Lenient Parsing
-```python
-from src.infrastructure import StrictJSONParser, LenientJSONParser
-
-# Strict: Fails on any parsing error
-strict_parser = StrictJSONParser()
-
-# Lenient: Attempts heuristic recovery
-lenient_parser = LenientJSONParser()
-```
-
-**Recommendation**: Use `LenientJSONParser` for evaluation to maximize successful parses.
-
-### Multi-GPU Training
-```python
-# Automatically uses all available GPUs
-trainer = LoRAAdapter(config)
-# HuggingFace Transformers handles multi-GPU via device_map="auto"
-```
-
-### Memory Optimization
-
-For OOM errors:
-1. Reduce `batch_size` (e.g., 2 or 1)
-2. Increase `gradient_accumulation_steps` (e.g., 8)
-3. Reduce `max_seq_length` (e.g., 1024)
-4. Use 4-bit quantization (already default)
+The model **never directly predicts** `is_ableist` — it is always derived from `principle_id`.
 
 ---
 
-## 📁 Project Structure
+## VRAM Budget (24 GB GPU)
+
+| Component | Estimated VRAM |
+|---|---|
+| Llama 3 8B base weights (4-bit NF4) | ~4.5 GB |
+| LoRA adapter weights (bf16, rank 16) | ~0.15 GB |
+| 8-bit Adam optimizer states | ~1.0 GB |
+| Activations (seq_len=2048, GC enabled) | ~4–6 GB |
+| **Total (estimated)** | **~10–12 GB** |
+
+Gradient checkpointing (Unsloth's own implementation) is enabled to trade compute for reduced activation memory.
+
+---
+
+## Type Checking
+
+```bash
+mypy src/ --strict
 ```
-jdc-system/
+
+---
+
+## Project Structure
+
+```
+jdc_project/
+├── config/config.yaml
+├── dataset/                   ← Place your JSON datasets here
+├── outputs/
+│   ├── checkpoints/
+│   └── logs/
 ├── src/
-│   ├── domain/              # Domain layer (pure logic)
-│   │   ├── __init__.py
-│   │   ├── interfaces.py    # Abstract ports (LLMTrainer, InferenceEngine, etc.)
-│   │   └── types.py         # Domain entities (Justification, LabeledExample, etc.)
-│   ├── application/         # Application layer (use cases)
-│   │   ├── __init__.py
-│   │   └── services.py      # FineTuneModelUseCase, EvaluateModelUseCase
-│   ├── infrastructure/      # Infrastructure layer (adapters)
-│   │   ├── __init__.py
-│   │   ├── llm.py          # LoRAAdapter, HuggingFaceInferenceAdapter
-│   │   ├── data_loader.py  # PreformattedDataLoader, FileBasedDataLoader
-│   │   ├── parsing.py      # RobustJSONParser, LenientJSONParser
-│   │   └── metrics.py      # StandardMetricsRepository, ReportGenerator
-│   ├── config.py           # Pydantic configuration models
-│   └── main.py             # CLI entry point
-├── dataset/                # Data directory
-│   ├── dataset.json        # Training data (required)
-│   ├── test_dataset.json   # Test data (required)
-│   └── val_dataset.json    # Validation data (optional)
-├── outputs/                # Generated outputs
-├── cache/                  # Model cache
+│   ├── main.py                ← CLI entry point
+│   ├── container.py           ← DI container
+│   ├── domain/
+│   │   ├── entities.py        ← Pydantic v2 data models
+│   │   ├── value_objects.py   ← PrincipleID enum + derive_label()
+│   │   └── exceptions.py      ← Custom exceptions
+│   ├── application/
+│   │   ├── ports/             ← Abstract interfaces
+│   │   └── use_cases/         ← Train / Evaluate / Infer orchestration
+│   └── infrastructure/
+│       ├── adapters/          ← JSON repo, Unsloth service, sklearn evaluator
+│       └── config/            ← OmegaConf loader
 ├── requirements.txt
+├── pyproject.toml
 └── README.md
 ```
-
----
-
-## 🤝 Contributing
-
-### Development Setup
-```bash
-# Install dev dependencies
-pip install ruff mypy pytest
-
-# Run type checking
-mypy src/
-
-# Format code
-ruff check src/ --fix
-```
-
-### Code Style
-
-- Follow Clean Architecture principles
-- Use type hints for all functions
-- Document with docstrings (Google style)
-- Maintain <100 line functions
-- Write unit tests for domain logic
-
-### Pull Request Process
-
-1. Fork the repository
-2. Create feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open Pull Request
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-## 🙏 Acknowledgments
-
-- **Transformers** by Hugging Face for LLM infrastructure
-- **PEFT** library for LoRA implementation
-- **TRL** for SFTTrainer
-- Neurodiversity advocacy community for principle definitions
-
----
