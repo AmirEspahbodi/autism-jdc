@@ -3,6 +3,7 @@
 Manually wires concrete implementations to abstract interfaces and
 assembles the three use cases.  No DI framework is required.
 """
+
 from __future__ import annotations
 
 import sys
@@ -33,10 +34,18 @@ class Container:
 
     Args:
         config_path: Optional explicit path to config.yaml.
+        model_local_dir: Optional path to a local model directory. When provided,
+                         the model is loaded from this path instead of downloading
+                         from HuggingFace Hub.
     """
 
-    def __init__(self, config_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        config_path: Path | None = None,
+        model_local_dir: Path | None = None,
+    ) -> None:
         self._config_path = config_path
+        self._model_local_dir = model_local_dir
         self._config: DictConfig | None = None
         self._repository: JsonDatasetRepository | None = None
         self._model_service: UnslothModelService | None = None
@@ -51,7 +60,15 @@ class Container:
         self._config = load_config(self._config_path)
         self._configure_logging(self._config)
         self._repository = JsonDatasetRepository(self._config)
-        self._model_service = UnslothModelService(self._config)
+        if self._model_local_dir is not None:
+            logger.info(f"Model will be loaded from local directory: {self._model_local_dir}")
+        else:
+            logger.info(
+                "Model will be downloaded from HuggingFace Hub (no --model-local-dir given)."
+            )
+        self._model_service = UnslothModelService(
+            self._config, model_local_dir=self._model_local_dir
+        )
         self._evaluator_service = SklearnEvaluatorService()
 
     def get_train_use_case(self) -> TrainUseCase:
@@ -117,9 +134,7 @@ class Container:
             ConfigurationError: If container is not wired.
         """
         if self._config is None:
-            raise ConfigurationError(
-                "Container.wire() must be called before accessing use cases."
-            )
+            raise ConfigurationError("Container.wire() must be called before accessing use cases.")
 
     @staticmethod
     def _configure_logging(config: DictConfig) -> None:
@@ -160,6 +175,4 @@ class Container:
             enqueue=True,  # Thread-safe async writing
         )
 
-        logger.info(
-            f"Logging configured. Level={log_level}, File={log_file}"
-        )
+        logger.info(f"Logging configured. Level={log_level}, File={log_file}")

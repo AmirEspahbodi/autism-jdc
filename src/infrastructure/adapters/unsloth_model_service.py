@@ -104,10 +104,14 @@ class UnslothModelService(IModelService):
     Args:
         config: OmegaConf DictConfig with ``model``, ``lora``, ``training``,
                 and ``evaluation`` sections.
+        model_local_dir: Optional path to a local directory containing a
+                         pre-downloaded model. When provided, overrides the
+                         HuggingFace Hub model name from config.
     """
 
-    def __init__(self, config: DictConfig) -> None:
+    def __init__(self, config: DictConfig, model_local_dir: Path | None = None) -> None:
         self._config = config
+        self._model_local_dir = model_local_dir
         self._model: Any = None
         self._tokenizer: PreTrainedTokenizerBase | None = None
 
@@ -126,20 +130,32 @@ class UnslothModelService(IModelService):
         model_cfg = self._config.model
         lora_cfg = self._config.lora
 
-        logger.info(f"Loading model '{model_cfg.name}' with Unsloth FastLanguageModel …")
+        # Determine model source: local dir overrides config model name
+        if self._model_local_dir is not None:
+            if not self._model_local_dir.exists() or not self._model_local_dir.is_dir():
+                raise ModelLoadError(
+                    f"--model-local-dir path does not exist or is not a directory: "
+                    f"{self._model_local_dir}. "
+                    "Ensure the model has been downloaded before running."
+                )
+            model_source = str(self._model_local_dir.resolve())
+            logger.info(f"Loading model from LOCAL directory: {model_source}")
+        else:
+            model_source = str(model_cfg.name)
+            logger.info(f"Loading model from HuggingFace Hub: {model_source}")
 
         try:
             dtype = torch.bfloat16 if str(model_cfg.dtype) == "bfloat16" else torch.float16
 
             model, tokenizer = FastLanguageModel.from_pretrained(
-                model_name=str(model_cfg.name),
+                model_name=model_source,
                 max_seq_length=int(model_cfg.max_seq_length),
                 load_in_4bit=bool(model_cfg.load_in_4bit),
                 dtype=dtype,
             )
         except Exception as exc:
             raise ModelLoadError(
-                f"FastLanguageModel.from_pretrained failed for '{model_cfg.name}': {exc}"
+                f"FastLanguageModel.from_pretrained failed for '{model_source}': {exc}"
             ) from exc
 
         logger.info("Applying QLoRA via FastLanguageModel.get_peft_model …")

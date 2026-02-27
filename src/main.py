@@ -63,6 +63,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to config.yaml (default: config/config.yaml)",
     )
+    parser.add_argument(
+        "--model-local-dir",
+        type=Path,
+        default=None,
+        metavar="MODEL_PATH",
+        help=(
+            "Path to a local directory containing a pre-downloaded model. "
+            "If provided, the model is loaded from this path instead of "
+            "downloading from HuggingFace Hub. "
+            "Example: --model-local-dir ./Meta-Llama-3.1-8B-Instruct"
+        ),
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -197,7 +209,10 @@ def main() -> None:
 
     # Wire the DI container
     try:
-        container = Container(config_path=args.config)
+        container = Container(
+            config_path=args.config,
+            model_local_dir=getattr(args, "model_local_dir", None),
+        )
         container.wire()
     except ConfigurationError as exc:
         logger.critical(f"Configuration error: {exc}")
