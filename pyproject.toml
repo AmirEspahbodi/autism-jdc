@@ -11,6 +11,7 @@ requires-python = "<3.14,>=3.11"
 license = { text = "MIT" }
 keywords = ["nlp", "ableism", "fine-tuning", "unsloth", "qlora", "llama3"]
 dependencies = [
+    trl, unsloth, transformers accelerate datasets pydantic scikit-learn
 ]
 [project.scripts]
 jdc = "src.main:main"
