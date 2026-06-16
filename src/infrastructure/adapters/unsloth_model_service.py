@@ -22,11 +22,14 @@ from loguru import logger
 from omegaconf import DictConfig
 from pydantic import ValidationError
 from transformers import PreTrainedTokenizerBase, TrainerCallback, TrainingArguments
-from trl import DataCollatorForCompletionOnlyLM, SFTConfig, SFTTrainer  # type: ignore[import]
+from trl import SFTConfig, SFTTrainer
 
 # Unsloth & TRL imports
 from unsloth import FastLanguageModel  # type: ignore[import]
-from unsloth.chat_templates import get_chat_template  # type: ignore[import]
+from unsloth.chat_templates import (  # type: ignore[import]
+    get_chat_template,  # type: ignore[import]
+    train_on_responses_only,
+)
 
 from src.application.ports.model_port import IModelService
 from src.domain.entities import JDCSample, ParsedOutput
@@ -77,12 +80,16 @@ class UnslothModelService(IModelService):
         lora_cfg = self._config.lora
 
         model_source = (
-            str(self._model_local_dir.resolve()) if self._model_local_dir else str(model_cfg.name)
+            str(self._model_local_dir.resolve())
+            if self._model_local_dir
+            else str(model_cfg.name)
         )
         logger.info(f"Loading model from: {model_source}")
 
         try:
-            dtype = torch.bfloat16 if str(model_cfg.dtype) == "bfloat16" else torch.float16
+            dtype = (
+                torch.bfloat16 if str(model_cfg.dtype) == "bfloat16" else torch.float16
+            )
 
             model, tokenizer = FastLanguageModel.from_pretrained(
                 model_name=model_source,
@@ -105,7 +112,9 @@ class UnslothModelService(IModelService):
             )
 
         except Exception as exc:
-            raise ModelLoadError(f"FastLanguageModel.from_pretrained failed: {exc}") from exc
+            raise ModelLoadError(
+                f"FastLanguageModel.from_pretrained failed: {exc}"
+            ) from exc
 
         logger.info("Applying QLoRA via FastLanguageModel.get_peft_model …")
 
@@ -120,7 +129,9 @@ class UnslothModelService(IModelService):
                 use_gradient_checkpointing="unsloth",
             )
         except Exception as exc:
-            raise ModelLoadError(f"FastLanguageModel.get_peft_model failed: {exc}") from exc
+            raise ModelLoadError(
+                f"FastLanguageModel.get_peft_model failed: {exc}"
+            ) from exc
 
         self._model = model
         self._tokenizer = tokenizer
@@ -133,7 +144,9 @@ class UnslothModelService(IModelService):
 
     def load_from_checkpoint(self, path: Path) -> None:
         if self._model is None or self._tokenizer is None:
-            raise ModelLoadError("Base model has not been loaded. Call load_model() first.")
+            raise ModelLoadError(
+                "Base model has not been loaded. Call load_model() first."
+            )
         if not path.exists():
             raise ModelLoadError(f"Checkpoint directory does not exist: {path}.")
 
@@ -148,7 +161,9 @@ class UnslothModelService(IModelService):
 
     def train(self, train_data: list[JDCSample], val_data: list[JDCSample]) -> None:
         if self._model is None or self._tokenizer is None:
-            raise ModelLoadError("Model must be loaded before training. Call load_model() first.")
+            raise ModelLoadError(
+                "Model must be loaded before training. Call load_model() first."
+            )
 
         train_cfg = self._config.training
         model_cfg = self._config.model
@@ -199,10 +214,13 @@ class UnslothModelService(IModelService):
             train_dataset=train_dataset,
             eval_dataset=val_dataset,
             args=sft_config,
-            data_collator=collator,
             callbacks=[LoguruTrainerCallback()],
         )
-
+        trainer = train_on_responses_only(
+            trainer,
+            instruction_part="<|start_header_id|>user<|end_header_id|>\n\n",
+            response_part="<|start_header_id|>assistant<|end_header_id|>\n\n",
+        )
         logger.info("Starting SFT training …")
         try:
             trainer.train()
@@ -216,7 +234,9 @@ class UnslothModelService(IModelService):
     def predict(self, prompt: str) -> ParsedOutput:
         """Refactored inference pipeline with injection protection and robust generation."""
         if self._model is None or self._tokenizer is None:
-            raise ModelLoadError("Model must be loaded before inference. Call load_model() first.")
+            raise ModelLoadError(
+                "Model must be loaded before inference. Call load_model() first."
+            )
 
         eval_cfg = self._config.evaluation
         model_cfg = self._config.model
@@ -253,7 +273,9 @@ class UnslothModelService(IModelService):
                     pad_token_id=self._tokenizer.eos_token_id,
                 )
         except Exception as exc:
-            raise InferenceError(f"model.generate() failed: {exc}", raw_output="") from exc
+            raise InferenceError(
+                f"model.generate() failed: {exc}", raw_output=""
+            ) from exc
 
         input_length = inputs["input_ids"].shape[1]
         generated_ids = output_ids[0][input_length:]
@@ -345,7 +367,9 @@ class UnslothModelService(IModelService):
             parsed_dict: Any = json_repair.loads(raw_text)
 
             if not isinstance(parsed_dict, dict):
-                raise ValueError(f"Decoded JSON is not a dictionary. Got type: {type(parsed_dict)}")
+                raise ValueError(
+                    f"Decoded JSON is not a dictionary. Got type: {type(parsed_dict)}"
+                )
 
             # 2. Map payload into structured Pydantic object
             parsed_output = ParsedOutput.model_validate(parsed_dict)
