@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+import json_repair  # Robust JSON parsing for LLMs
 import torch
 from loguru import logger
 from omegaconf import DictConfig
@@ -51,9 +52,6 @@ class LoguruTrainerCallback(TrainerCallback):  # type: ignore[misc]
         if logs:
             logger.info(f"Trainer log: {logs}")
 
-
-# NOTE: _build_compute_metrics has been deliberately removed.
-# SFTTrainer will natively track eval_loss which is mathematically correct.
 
 # ---------------------------------------------------------------------------
 # Main service class
@@ -93,7 +91,7 @@ class UnslothModelService(IModelService):
                 dtype=dtype,
             )
 
-            # --- FIX: Apply Llama-3 Chat Template natively to the Tokenizer ---
+            # --- Apply Llama-3 Chat Template natively to the Tokenizer ---
             logger.info("Applying Llama-3 chat template to tokenizer...")
             tokenizer = get_chat_template(
                 tokenizer,
@@ -160,9 +158,7 @@ class UnslothModelService(IModelService):
         val_dataset = self._build_hf_dataset(val_data)
         logger.info(f"Train size: {len(train_dataset)}, Val size: {len(val_dataset)}.")
 
-        # --- FIX: Loss Alignment via Completion-Only Data Collator ---
-        # The exact token header Llama-3 outputs before the target answer.
-        # This masks out the user's prompt so cross-entropy loss is 100% focused on JSON.
+        # --- Loss Alignment via Completion-Only Data Collator ---
         response_template = "<|start_header_id|>assistant<|end_header_id|>\n\n"
         try:
             collator = DataCollatorForCompletionOnlyLM(
@@ -188,7 +184,6 @@ class UnslothModelService(IModelService):
             logging_steps=int(train_cfg.logging_steps),
             eval_strategy=str(train_cfg.eval_strategy),
             save_strategy=str(train_cfg.save_strategy),
-            # --- FIX: Best Model Checkpointing ---
             load_best_model_at_end=True,
             metric_for_best_model="eval_loss",
             greater_is_better=False,
@@ -219,6 +214,7 @@ class UnslothModelService(IModelService):
         self._model = trainer.model
 
     def predict(self, prompt: str) -> ParsedOutput:
+        """Refactored inference pipeline with injection protection and robust generation."""
         if self._model is None or self._tokenizer is None:
             raise ModelLoadError("Model must be loaded before inference. Call load_model() first.")
 
@@ -230,8 +226,11 @@ class UnslothModelService(IModelService):
         except Exception as exc:
             logger.warning(f"FastLanguageModel.for_inference failed: {exc}.")
 
-        # --- FIX: Apply Inference Chat Template to generate proper starting tokens ---
-        messages = [{"role": "user", "content": prompt}]
+        # --- Sanitize against prompt injection ---
+        safe_prompt = self._sanitize_input(prompt)
+
+        # --- Apply Inference Chat Template ---
+        messages = [{"role": "user", "content": safe_prompt}]
         formatted_prompt = self._tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
@@ -247,9 +246,10 @@ class UnslothModelService(IModelService):
             with torch.no_grad():
                 output_ids = self._model.generate(
                     **inputs,
-                    max_new_tokens=int(eval_cfg.max_new_tokens),
-                    do_sample=False,
-                    temperature=1.0,
+                    # Buffer max_new_tokens to prevent frequent cutoffs during JSON formatting
+                    max_new_tokens=int(eval_cfg.max_new_tokens) + 256,
+                    do_sample=False,  # Enforces Greedy Decoding
+                    # Note: temperature is inherently ignored when do_sample=False.
                     pad_token_id=self._tokenizer.eos_token_id,
                 )
         except Exception as exc:
@@ -281,6 +281,22 @@ class UnslothModelService(IModelService):
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _sanitize_input(self, text: str) -> str:
+        """Strips Llama-3 control tokens from raw text.
+        Prevents prompt injection boundaries from triggering premature generation.
+        """
+        dangerous_tokens = [
+            "<|eot_id|>",
+            "<|start_header_id|>",
+            "<|end_header_id|>",
+            "<|begin_of_text|>",
+            "<|end_of_text|>",
+            "<|reserved_special_token_",
+        ]
+        for token in dangerous_tokens:
+            text = text.replace(token, "")
+        return text.strip()
+
     def _build_hf_dataset(self, samples: list[JDCSample]) -> Any:
         from datasets import Dataset  # type: ignore[import]
 
@@ -292,7 +308,7 @@ class UnslothModelService(IModelService):
             output_dict = sample.parsed_output.model_dump()
             output_json_str = json.dumps(output_dict, ensure_ascii=False)
 
-            # --- FIX: Format training text with Llama-3 Chat Template ---
+            # --- Format training text with Llama-3 Chat Template ---
             messages = [
                 {"role": "user", "content": sample.input_prompt},
                 {"role": "assistant", "content": output_json_str},
@@ -323,53 +339,52 @@ class UnslothModelService(IModelService):
 
     @staticmethod
     def _parse_generated_output(raw_text: str) -> ParsedOutput:
-        """Extract and validate a ParsedOutput from raw generated text safely."""
-        # --- FIX: Robust Extraction via Regex ---
-        match = re.search(r"\{.*?\}?", raw_text, re.DOTALL)
-        if not match:
-            raise InferenceError(
-                f"No JSON object found. Raw text (first 300 chars): {raw_text[:300]!r}",
-                raw_output=raw_text,
+        """Extract and validate a ParsedOutput from raw generated text safely using json_repair and Semantic Salvage."""
+        try:
+            # 1. Use json_repair to intelligently reconstruct missing braces, quotes, and trailing text.
+            parsed_dict: Any = json_repair.loads(raw_text)
+
+            if not isinstance(parsed_dict, dict):
+                raise ValueError(f"Decoded JSON is not a dictionary. Got type: {type(parsed_dict)}")
+
+            # 2. Map payload into structured Pydantic object
+            parsed_output = ParsedOutput.model_validate(parsed_dict)
+            label = derive_label(parsed_output.principle_id)
+
+            return ParsedOutput(
+                justification_reasoning=parsed_output.justification_reasoning,
+                evidence_quote=parsed_output.evidence_quote,
+                principle_id=parsed_output.principle_id,
+                principle_name=parsed_output.principle_name,
+                is_ableist=label,
             )
 
-        json_str = match.group(0).strip()
+        except (ValueError, ValidationError) as primary_exc:
+            # 3. SEMANTIC SALVAGE STRATEGY
+            # If the JSON is fundamentally broken beyond repair, we scan the text for a valid
+            # principle classification so we don't skew False Negative evaluation metrics by defaulting to P0.
+            logger.warning(
+                f"JSON validation failed, attempting Semantic Salvage... Error: {primary_exc}"
+            )
 
-        # --- FIX: Heuristic Recovery for Max Token Cutoffs ---
-        try:
-            parsed_dict: dict[str, Any] = json.loads(json_str)
-        except json.JSONDecodeError:
-            logger.warning("Malformed JSON detected. Attempting heuristic repair...")
-            if json_str.count('"') % 2 != 0:
-                json_str += '"'
-            if not json_str.endswith("}"):
-                json_str += "}"
+            salvage_match = re.search(r"(P[0-4])", raw_text)
 
-            try:
-                parsed_dict = json.loads(json_str)
-            except json.JSONDecodeError as exc:
-                raise InferenceError(
-                    f"Fatal JSON decode after repair: {exc}", raw_output=raw_text
-                ) from exc
+            if salvage_match:
+                salvaged_principle = salvage_match.group(1)
+                logger.info(f"Successfully salvaged principle: {salvaged_principle}")
+                return ParsedOutput(
+                    justification_reasoning=f"[SALVAGED] Partial reasoning: {raw_text[:200]}...",
+                    evidence_quote="[SALVAGED]",
+                    principle_id=salvaged_principle,
+                    principle_name="Salvaged Principle",
+                    is_ableist=derive_label(salvaged_principle),
+                )
 
-        try:
-            parsed_output = ParsedOutput.model_validate(parsed_dict)
-        except ValidationError as exc:
+            # 4. If all fails, raise the Inference Error
             raise InferenceError(
-                f"ParsedOutput validation failed: {exc}", raw_output=raw_text
-            ) from exc
-
-        try:
-            label = derive_label(parsed_output.principle_id)
-        except ValueError as exc:
-            raise InferenceError(f"derive_label failed: {exc}", raw_output=raw_text) from exc
-
-        return ParsedOutput(
-            justification_reasoning=parsed_output.justification_reasoning,
-            evidence_quote=parsed_output.evidence_quote,
-            principle_id=parsed_output.principle_id,
-            principle_name=parsed_output.principle_name,
-            is_ableist=label,
-        )
+                f"Fatal parse failure. Could not salvage principle. {primary_exc}",
+                raw_output=raw_text,
+            ) from primary_exc
 
     @staticmethod
     def _assert_cuda() -> None:
